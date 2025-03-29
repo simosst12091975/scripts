@@ -1,0 +1,11 @@
+---
+- hosts: all
+  gather_facts: false # Optional, speeds up the playbook if you don't need facts
+  tasks:
+    - name: Test connection
+      ping:
+      register: ping_result
+
+    - name: Display ping result
+      debug:
+        var: ping_result.ping
