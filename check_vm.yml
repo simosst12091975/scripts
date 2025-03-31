@@ -1,0 +1,23 @@
+---
+- hosts: gassino
+  become: true
+  gather_facts: false # systemd typically doesn't need facts
+
+  tasks:
+    - name: Check httpd service
+      community.general.systemd:
+        name: httpd
+        state: started                      
+      register: httpd_status
+
+    - name: Check the status of sshd
+      community.general.systemd:
+        name: sshd
+        state: started
+      register: sshd_status
+
+    - name: Check firewalld service
+      community.general.systemd:
+        name: firewalld
+        state: started
+      register: firewalld_status
