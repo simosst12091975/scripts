@@ -1,5 +1,5 @@
 ---
-- hosts: gassino
+- hosts: cluster
   gather_facts: false # Optional, speeds up the playbook if you don't need facts
   tasks:
     - name: Test connection
