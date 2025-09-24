@@ -6,7 +6,7 @@
 
   tasks:
     - name: Get list of all nodes
-      kubernetes.core:
+      kubernetes.core.k8s:
         api_version: v1
         kind: Node
       register: nodes
@@ -17,7 +17,7 @@
       loop: "{{ nodes.resources }}"
 
     - name: Get list of all pods
-      kubernetes.core:
+      kubernetes.core.k8s:
         api_version: v1
         kind: Pod
       register: pods
