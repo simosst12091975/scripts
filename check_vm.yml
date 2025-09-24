@@ -1,8 +1,9 @@
 ---
 - hosts: kubernetes
   become: true
-  gather_facts: false # systemd typically doesn't need facts
+  gather_facts: false
 
+  tasks:
     - name: Check kubelet service
       community.general.systemd:
         name: kubelet
