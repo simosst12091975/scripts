@@ -5,19 +5,16 @@
 
   tasks:
     - name: Check kubelet service
-      community.general:
         name: kubelet
         state: started
       register: kubelet_status
   
     - name: Check the status of sshd
-      community.general:
         name: sshd
         state: started
       register: sshd_status
 
     - name: Check firewalld service
-      community.general:
         name: firewalld
         state: started
       register: firewalld_status
