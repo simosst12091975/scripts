@@ -17,8 +17,7 @@
       comment: James Doe
       groups: adm,cockpit-ws
       uid: 1040
-
----   
+ 
 - name: SSH verification
   hosts: all
   become: yes
