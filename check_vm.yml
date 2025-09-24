@@ -1,15 +1,14 @@
 ---
-- hosts: gassino
+- hosts: kubernetes
   become: true
   gather_facts: false # systemd typically doesn't need facts
 
-  tasks:
-    - name: Check httpd service
+    - name: Check kubelet service
       community.general.systemd:
-        name: httpd
-        state: started                      
-      register: httpd_status
-
+        name: kubelet
+        state: started
+      register: kubelet_status
+  
     - name: Check the status of sshd
       community.general.systemd:
         name: sshd
