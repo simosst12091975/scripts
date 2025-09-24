@@ -13,7 +13,6 @@
   - name: Add the user 'james' with a bash shell, appending the group 'adm' and 'sudo' to the user's groups
     ansible.builtin.user:
     name: james
-    shell: /bin/bash
     groups: admins,sudo
     append: yes
 
