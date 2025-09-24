@@ -1,32 +1,29 @@
 ---
-- name: Check Kubernetes cluster health
+- name: Query Kubernetes Cluster for Metrics
   hosts: kubernetes
   connection: local
   gather_facts: false
 
   tasks:
     - name: Get list of all nodes
-      kubernetes.core.k8s:
-        api_version: v1
+      kubernetes.core.k8s_info:
         kind: Node
-      register: nodes
+      register: nodes_info
 
-    - name: Check node status
+    - name: Get CPU and memory usage from all nodes
+      kubernetes.core.k8s_info:
+        api_version: v1beta1
+        kind: NodeMetrics
+      register: node_metrics
+
+    - name: Display Node Status and Metrics
       ansible.builtin.debug:
-        msg: "Node {{ item.metadata.name }} is ready: {{ 'Ready' in (item.status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | list) }}"
-      loop: "{{ nodes.resources }}"
-
-    - name: Get list of all pods
-      kubernetes.core.k8s:
-        api_version: v1
-        kind: Pod
-      register: pods
-
-    - name: Check if all pods are running
-      ansible.builtin.debug:
-        msg: "The cluster has {{ pods.resources | length }} pods. All are running: {{ (pods.resources | map(attribute='status.phase') | unique | difference(['Running'])) | length == 0 }}"
-
-    - name: Fail if any pod is not in 'Running' state
-      ansible.builtin.fail:
-        msg: "Not all pods are in the 'Running' state."
-      when: (pods.resources | map(attribute='status.phase') | unique | difference(['Running'])) | length != 0
+        msg: |
+          Node: {{ item.metadata.name }}
+          Status: {{ 'Ready' in (item.status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | list) }}
+          CPU Used: {{ (node_metrics.resources | selectattr('metadata.name', 'equalto', item.metadata.name) | first).usage.cpu }}
+          Memory Used: {{ (node_metrics.resources | selectattr('metadata.name', 'equalto', item.metadata.name) | first).usage.memory }}
+          Total CPU: {{ item.status.capacity.cpu }}
+          Total Memory: {{ item.status.capacity.memory }}
+          Total Ephemeral Storage: {{ item.status.capacity['ephemeral-storage'] }}
+      loop: "{{ nodes_info.resources }}"
