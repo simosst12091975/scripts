@@ -10,14 +10,15 @@
       dest: /tmp/test.yml
       mode: '0644'
 
-  - name: Add user
+  - name: Add the user 'james' with a bash shell, appending the group 'adm' and 'cockpit-ws' to the user's groups
     ansible.builtin.user:
       name: james
+      shell: /bin/bash
       comment: James Doe
       groups: adm,cockpit-ws
       uid: 1040
-      append: yes
-   
+
+---   
 - name: SSH verification
   hosts: all
   become: yes
