@@ -10,7 +10,7 @@
       dest: /tmp/test.yml
       mode: '0644'
 
-  - name: "Add the user 'james' with a bash shell, appending the group 'adm' and 'cockpit-ws' to the user's groups"
+  - name: Add user
     ansible.builtin.user:
     name: james
     comment: James Doe
