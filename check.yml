@@ -16,7 +16,7 @@
     comment: James Doe
     shell: /bin/bash
     group: adm
-    groups: adm,cockpit-ws
+    groups: cockpit-ws
     uid: 1040
     append: yes
    
