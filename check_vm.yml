@@ -1,6 +1,6 @@
 ---
 - name: Check Kubernetes cluster health
-  hosts: localhost
+  hosts: kubernetes
   connection: local
   gather_facts: false
 
