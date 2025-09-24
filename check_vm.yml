@@ -1,20 +1,32 @@
 ---
-- hosts: kubernetes
-  become: true
+- name: Check Kubernetes cluster health
+  hosts: localhost
+  connection: local
   gather_facts: false
 
   tasks:
-    - name: Check kubelet service
-        name: kubelet
-        state: started
-      register: kubelet_status
-  
-    - name: Check the status of sshd
-        name: sshd
-        state: started
-      register: sshd_status
+    - name: Get list of all nodes
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: nodes
 
-    - name: Check firewalld service
-        name: firewalld
-        state: started
-      register: firewalld_status
+    - name: Check node status
+      ansible.builtin.debug:
+        msg: "Node {{ item.metadata.name }} is ready: {{ 'Ready' in (item.status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | list) }}"
+      loop: "{{ nodes.resources }}"
+
+    - name: Get list of all pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+      register: pods
+
+    - name: Check if all pods are running
+      ansible.builtin.debug:
+        msg: "The cluster has {{ pods.resources | length }} pods. All are running: {{ (pods.resources | map(attribute='status.phase') | unique | difference(['Running'])) | length == 0 }}"
+
+    - name: Fail if any pod is not in 'Running' state
+      ansible.builtin.fail:
+        msg: "Not all pods are in the 'Running' state."
+      when: (pods.resources | map(attribute='status.phase') | unique | difference(['Running'])) | length != 0
