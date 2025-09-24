@@ -1,0 +1,58 @@
+---
+
+- name: Playbook di TEST
+
+  hosts: all
+
+  become: yes
+
+
+  tasks:
+
+  - name: Copy file test /tmp with permissions
+
+    ansible.builtin.copy:
+
+      src: ./test.yml
+
+      dest: /tmp/test.yml
+
+      mode: '0644'
+
+
+  - name: Add the user 'pippo' with a specific uid
+
+    ansible.builtin.user:
+
+      name: pippo
+
+      state: present
+
+      uid: 1040
+
+
+- name: SSH verification
+
+  hosts: all
+
+  become: yes
+
+
+  tasks:
+
+  - name: Ensure 'ssh' is at the latest version
+
+    ansible.builtin.apt:
+
+      name: ssh
+
+      state: latest
+
+
+  - name: Ensure that 'ssh' is started
+
+    ansible.builtin.service:
+
+      name: ssh
+
+      state: started
