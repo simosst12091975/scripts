@@ -14,7 +14,6 @@
     ansible.builtin.user:
       name: james
       comment: James Doe
-      shell: /bin/bash
       groups: adm,cockpit-ws
       uid: 1040
       append: yes
