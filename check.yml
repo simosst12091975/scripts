@@ -6,7 +6,7 @@
   tasks:
   - name: Copy file test /tmp with permissions
     ansible.builtin.copy:
-      src: ./test.yml
+      src: /home/semaphore/test.yml
       dest: /tmp/test.yml
       mode: '0644'
 
