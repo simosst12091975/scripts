@@ -97,8 +97,46 @@
         success_msg: >-
           Sistema supportato: Ubuntu {{ ansible_facts.distribution_version }}.
 
+    - name: Aggiorna i pacchetti senza cambiare la release di Ubuntu
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        upgrade: safe
+      register: system_update
+      become: true
+
+    - name: Verifica che la release Ubuntu sia rimasta invariata
+      ansible.builtin.command:
+        argv:
+          - bash
+          - -c
+          - '. /etc/os-release && printf "%s %s" "$ID" "$VERSION_ID"'
+      register: release_after_update
+      changed_when: false
+
+    - name: Conferma che l'aggiornamento non abbia cambiato release
+      ansible.builtin.assert:
+        that:
+          - release_after_update.stdout == "ubuntu " ~ ansible_facts.distribution_version
+        fail_msg: >-
+          La release del sistema è cambiata inaspettatamente:
+          {{ release_after_update.stdout }}.
+          Release iniziale: Ubuntu {{ ansible_facts.distribution_version }}.
+        success_msg: >-
+          Release invariata: Ubuntu {{ ansible_facts.distribution_version }}.
+
+    - name: Mostra il risultato degli aggiornamenti
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Pacchetti aggiornati.' if system_update.changed else
+          'Sistema già aggiornato: nessun pacchetto da aggiornare.' }}
+
     - name: Verifica aggiornamenti kernel
-      ansible.builtin.command: apt list --upgradable 2>/dev/null | grep -i linux-image || echo "kernel_updated"
+      ansible.builtin.command:
+        argv:
+          - apt
+          - list
+          - --upgradable
       register: kernel_updates
       changed_when: false
       failed_when: false
@@ -106,7 +144,8 @@
     - name: Avviso aggiornamenti kernel disponibili
       ansible.builtin.debug:
         msg: >-
-          Aggiornamenti kernel disponibili. Eseguire: sudo apt update && sudo apt upgrade linux-image-*
+          Restano aggiornamenti kernel dopo l'aggiornamento dei pacchetti.
+          Potrebbe essere necessario riavviare il server per applicarli.
       when: "'linux-image' in kernel_updates.stdout"
 
     - name: Raccoglie i pacchetti installati
