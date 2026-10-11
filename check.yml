@@ -51,7 +51,7 @@
       ansible.builtin.assert:
         that:
           - ansible_facts.distribution == "Ubuntu"
-          - ansible_facts.distribution_major_version in ["24", "26"]
+          - ansible_facts.distribution_version is regex('^(24\\.04|26\\.04)$')
         fail_msg: >-
           Sistema non supportato: {{ ansible_facts.distribution }}
           {{ ansible_facts.distribution_version }}.
@@ -90,6 +90,7 @@
     - name: Verifica che il servizio SSH sia in esecuzione
       ansible.builtin.assert:
         that:
+          - ssh_service_name in ansible_facts.services
           - ansible_facts.services[ssh_service_name].state == "running"
         fail_msg: "Il servizio {{ ssh_service_name }} non è in esecuzione."
 
