@@ -43,8 +43,7 @@
 - name: "Verifica server Ubuntu - Flexible Mode (Tutti gli Host)"
   hosts: all
   gather_facts: true
-  become: true
-  become_user: root
+  become: false
   serial: 1
   vars:
     ansible_python_interpreter: /usr/bin/python3
@@ -70,16 +69,6 @@
         current_uid: "{{ current_uid_result.stdout }}"
         current_user: "{{ current_user_result.stdout }}"
 
-    - name: Verifica privilegi root necessari per aggiornare il sistema
-      ansible.builtin.assert:
-        that:
-          - current_uid == "0"
-        fail_msg: >-
-          Ansible non è riuscito a diventare root sul server.
-          Abilitare Become/Sudo nel template Semaphore e configurare la password
-          di escalation se sudo la richiede.
-        success_msg: "Escalation privilegi verificata: task in esecuzione come root."
-
     - name: Crea directory per report
       ansible.builtin.file:
         path: "{{ report_dir }}"
@@ -91,8 +80,8 @@
       ansible.builtin.debug:
         msg: >-
           Avviso: il playbook è in esecuzione come {{ current_user }} (UID: {{ current_uid }}).
-          Alcune verifiche amministrative e tutte le modifiche di sistema verranno saltate.
-          Abilitare l'escalation dei privilegi (become/sudo) nel template o nelle credenziali di Semaphore.
+          La raccolta facts non richiede root. I task amministrativi usano become esplicitamente
+          e richiedono l'escalation configurata nel template o nelle credenziali di Semaphore.
       when: current_uid != "0"
 
     - name: Conferma esecuzione con root
