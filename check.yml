@@ -120,6 +120,17 @@
       register: system_update
       become: true
       become_user: root
+      ignore_unreachable: true
+
+    - name: Chiude la connessione SSH persistente dopo gli aggiornamenti
+      ansible.builtin.meta: reset_connection
+
+    - name: Attende che il server sia nuovamente raggiungibile via SSH
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        connect_timeout: 10
+        sleep: 10
+        timeout: 600
 
     - name: Verifica che la release Ubuntu sia rimasta invariata
       ansible.builtin.command:
