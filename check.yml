@@ -1,6 +1,6 @@
 ---
 - name: Bootstrap Python per Ansible su Ubuntu
-  hosts: laboratorio_ai
+  hosts: laboratorio_ai_oracle
   gather_facts: false
   become: false
   vars:
