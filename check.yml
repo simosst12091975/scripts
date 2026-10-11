@@ -44,6 +44,7 @@
   hosts: all
   gather_facts: true
   become: true
+  become_user: root
   serial: 1
   vars:
     ansible_python_interpreter: /usr/bin/python3
@@ -68,6 +69,16 @@
       ansible.builtin.set_fact:
         current_uid: "{{ current_uid_result.stdout }}"
         current_user: "{{ current_user_result.stdout }}"
+
+    - name: Verifica privilegi root necessari per aggiornare il sistema
+      ansible.builtin.assert:
+        that:
+          - current_uid == "0"
+        fail_msg: >-
+          Ansible non è riuscito a diventare root sul server.
+          Abilitare Become/Sudo nel template Semaphore e configurare la password
+          di escalation se sudo la richiede.
+        success_msg: "Escalation privilegi verificata: task in esecuzione come root."
 
     - name: Crea directory per report
       ansible.builtin.file:
@@ -108,6 +119,7 @@
         upgrade: safe
       register: system_update
       become: true
+      become_user: root
 
     - name: Verifica che la release Ubuntu sia rimasta invariata
       ansible.builtin.command:
