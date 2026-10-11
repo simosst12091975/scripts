@@ -1,6 +1,6 @@
 ---
 - name: Bootstrap Python per Ansible su Ubuntu (Strict Mode - Richiede Root)
-  hosts: laboratorio_ai
+  hosts: all
   gather_facts: false
   become: true
   vars:
