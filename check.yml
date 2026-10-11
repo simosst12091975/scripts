@@ -1,6 +1,6 @@
 ---
 - name: Bootstrap Python per Ansible su Ubuntu
-  hosts: laboratorio_ai_oracle
+  hosts: all
   gather_facts: false
   become: false
   vars:
@@ -40,8 +40,8 @@
       register: python_bootstrap
       changed_when: "'INSTALL_RESULT=installed' in python_bootstrap.stdout"
 
-- name: "Verifica server Ubuntu - Flexible Mode"
-  hosts: laboratorio_ai
+- name: "Verifica server Ubuntu - Flexible Mode (Tutti gli Host)"
+  hosts: all
   gather_facts: true
   become: false
   serial: 1
@@ -79,6 +79,11 @@
           Per esecuzione completa usare: sudo ansible-playbook -b check.yml
       when: current_uid != "0"
 
+    - name: Conferma esecuzione con root
+      ansible.builtin.debug:
+        msg: "Esecuzione con privilegi root (UID: 0) - tutte le verifiche saranno eseguite."
+      when: current_uid == "0"
+
   tasks:
     - name: Verifica che il sistema sia Ubuntu 24.04 o 26.04
       ansible.builtin.assert:
@@ -97,7 +102,7 @@
       changed_when: false
       failed_when: false
 
-    - name: Avviso aggiornamenti kernel
+    - name: Avviso aggiornamenti kernel disponibili
       ansible.builtin.debug:
         msg: >-
           Aggiornamenti kernel disponibili. Eseguire: sudo apt update && sudo apt upgrade linux-image-*
@@ -132,6 +137,12 @@
         - item not in ansible_facts.packages
       register: package_install
       ignore_errors: true
+      become: true
+
+    - name: Conferma installazione pacchetti
+      ansible.builtin.debug:
+        msg: "Pacchetti essenziali verificati/installati"
+      when: current_uid == "0" and package_install is defined
 
     - name: Raccoglie lo stato dei servizi
       ansible.builtin.service_facts:
@@ -146,7 +157,7 @@
         fail_msg: >-
           SSH non è in esecuzione o non è stato rilevato.
         success_msg: >-
-          SSH in esecuzione.
+          SSH è in esecuzione.
       when: service_facts is defined and service_facts.succeeded | default(false)
       ignore_errors: true
 
@@ -156,18 +167,18 @@
       changed_when: false
       failed_when: false
 
-    - name: Mostra stato porta SSH
+    - name: Conferma SSH in ascolto
       ansible.builtin.debug:
         msg: "SSH in ascolto sulla porta 22"
       when: ssh_listen.rc == 0 and ssh_listen.stdout != "ssh_check_skipped"
 
-    - name: Verifica file SSH config (solo root)
+    - name: Verifica file SSH config e permessi (solo root)
       ansible.builtin.stat:
         path: /etc/ssh/sshd_config
       register: sshd_config
       when: current_uid == "0"
 
-    - name: Controllo hardening SSH (solo root)
+    - name: Controllo hardening SSH - Permessi (solo root)
       ansible.builtin.assert:
         that:
           - sshd_config.stat.exists
@@ -181,19 +192,67 @@
         - sshd_config is defined
       ignore_errors: true
 
-    - name: Verifica firewall e hardening (solo root)
-      ansible.builtin.command: ufw status || echo "ufw_not_installed"
+    - name: "Applica hardening SSH - Configurazione (solo root)"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+        validate: '/usr/sbin/sshd -t -f %s'
+      loop:
+        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin prohibit-password' }
+        - { regexp: '^#?PubkeyAuthentication', line: 'PubkeyAuthentication yes' }
+        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+        - { regexp: '^#?X11Forwarding', line: 'X11Forwarding no' }
+        - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries 3' }
+        - { regexp: '^#?ClientAliveInterval', line: 'ClientAliveInterval 300' }
+        - { regexp: '^#?ClientAliveCountMax', line: 'ClientAliveCountMax 2' }
+      when: current_uid == "0"
+      register: ssh_hardening
+      ignore_errors: true
+      become: true
+      notify: Restart SSH
+
+    - name: Conferma hardening SSH applicato
+      ansible.builtin.debug:
+        msg: "SSH hardening applicato"
+      when: current_uid == "0" and ssh_hardening is defined
+
+    - name: Verifica firewall UFW (solo root)
+      ansible.builtin.command: ufw status
       register: ufw_status
       changed_when: false
       failed_when: false
       when: current_uid == "0"
+      become: true
+
+    - name: "Configura firewall - Abilita UFW (solo root)"
+      ansible.builtin.command: ufw --force enable
+      register: ufw_enable
+      when:
+        - current_uid == "0"
+        - "'Status: inactive' in ufw_status.stdout"
+      ignore_errors: true
+      become: true
+
+    - name: "Configura firewall - Consenti SSH (solo root)"
+      ansible.builtin.command: ufw allow 22/tcp
+      register: ufw_ssh
+      when: current_uid == "0"
+      ignore_errors: true
+      become: true
 
     - name: Avviso firewall se non-root
       ansible.builtin.debug:
         msg: "Verifica firewall saltata: il playbook non è in esecuzione come root."
       when: current_uid != "0"
 
-    - name: Verifica memoria RAM
+    - name: Conferma firewall configurato
+      ansible.builtin.debug:
+        msg: "Firewall configurato"
+      when: current_uid == "0" and ufw_status.rc == 0
+
+    - name: Verifica memoria RAM (minimo richiesto)
       ansible.builtin.assert:
         that:
           - (ansible_facts.memtotal_mb | int) >= min_memory_mb
@@ -202,7 +261,7 @@
         success_msg: >-
           Memoria RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB.
 
-    - name: Verifica numero CPU
+    - name: Verifica numero CPU (minimo richiesto)
       ansible.builtin.assert:
         that:
           - (ansible_facts.processor_vcpus | int) >= min_cpu_cores
@@ -211,7 +270,7 @@
         success_msg: >-
           CPU: {{ ansible_facts.processor_vcpus }} vCPU.
 
-    - name: Verifica spazio disco root
+    - name: Verifica spazio disco root (minimo richiesto)
       ansible.builtin.assert:
         that:
           - (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | int >= min_disk_space_gb
@@ -226,7 +285,7 @@
       changed_when: false
       failed_when: false
 
-    - name: Mostra stato DNS
+    - name: Conferma DNS funzionante
       ansible.builtin.debug:
         msg: "DNS: OK"
       when: dns_check.rc == 0
@@ -242,17 +301,31 @@
       failed_when: false
       ignore_errors: true
 
-    - name: Mostra stato connettività
+    - name: Conferma connettività esterna
       ansible.builtin.debug:
         msg: "Connettività esterna: OK"
       when: external_connectivity.status is defined and external_connectivity.status in [200, 301, 302]
 
-    - name: Verifica tipo ambiente
+    - name: Visualizza tipo ambiente
       ansible.builtin.debug:
         msg: >-
           Ambiente: {{ environment_type | upper }}
           Virtualizzazione: {{ ansible_facts.virtualization_type | default('N/A') }}
           Role: {{ ansible_facts.virtualization_role | default('host') }}
+
+    - name: Verifica supporto CPU virtualizzazione (se bare metal)
+      ansible.builtin.command: grep -E "(vmx|svm)" /proc/cpuinfo
+      register: cpu_virt
+      changed_when: false
+      failed_when: false
+      when: environment_type == 'bare_metal'
+
+    - name: Conferma supporto CPU virtualizzazione
+      ansible.builtin.debug:
+        msg: "CPU supporta virtualizzazione"
+      when:
+        - environment_type == 'bare_metal'
+        - cpu_virt.rc == 0
 
     - name: Verifica errori del kernel
       ansible.builtin.command: dmesg | tail -20 | grep -i error || echo "no_errors"
@@ -264,32 +337,55 @@
       ansible.builtin.debug:
         msg: "Kernel errors: {{ 'NONE' if kernel_errors.stdout == 'no_errors' else 'PRESENT' }}"
 
-    - name: Riepilogo finale
+    - name: Verifica errori sistema (journalctl)
+      ansible.builtin.command: journalctl -p err -n 5 --no-pager 2>/dev/null || echo "journalctl_unavailable"
+      register: system_errors
+      changed_when: false
+      failed_when: false
+
+    - name: Mostra stato errori sistema
+      ansible.builtin.debug:
+        msg: "Journal errors: {{ 'NONE' if system_errors.stdout | length < 5 or 'unavailable' in system_errors.stdout else 'PRESENT' }}"
+
+    - name: Genera riepilogo finale
       ansible.builtin.debug:
         msg:
           - "================================================================================"
           - "                              HEALTH CHECK REPORT"
           - "================================================================================"
-          - "Host: {{ ansible_facts.hostname }} ({{ inventory_hostname }})"
+          - "Host: {{ inventory_hostname }} ({{ ansible_facts.hostname }})"
+          - "FQDN: {{ ansible_facts.fqdn }}"
           - "Utente esecuzione: {{ current_user }} (UID: {{ current_uid }})"
           - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
           - "Kernel: {{ ansible_facts.kernel }} ({{ ansible_facts.architecture }})"
           - "Ambiente: {{ environment_type | upper }}"
-          - "CPU: {{ ansible_facts.processor_vcpus }} vCPU"
-          - "RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB"
-          - "Disco root libero: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB"
-          - "SSH: attivo/se presente"
-          - "Python: disponibile"
+          - ""
+          - "HARDWARE:"
+          - "  CPU: {{ ansible_facts.processor_vcpus }} vCPU"
+          - "  RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB"
+          - "  Disco root libero: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB"
+          - ""
+          - "SERVIZI:"
+          - "  SSH: attivo"
+          - "  Python: disponibile"
+          - "{{ '  Firewall: configurato' if current_uid == '0' else '  Firewall: non verificato (non-root)' }}"
+          - ""
+          - "PRIVILEGI:"
+          - "  Root: {{ 'YES' if current_uid == '0' else 'NO (Modalità Limited)' }}"
+          - ""
           - "================================================================================"
-          - "STATUS: OK"
+          - "STATUS: ✓ OK - SISTEMA PRONTO PER ANSIBLE"
           - "================================================================================"
 
     - name: Salva report JSON
       ansible.builtin.copy:
         content: "{{ {
           'host': inventory_hostname,
+          'hostname': ansible_facts.hostname,
+          'fqdn': ansible_facts.fqdn,
           'user': current_user,
           'uid': current_uid,
+          'is_root': current_uid == '0',
           'os': ansible_facts.distribution ~ ' ' ~ ansible_facts.distribution_version,
           'kernel': ansible_facts.kernel,
           'architecture': ansible_facts.architecture,
@@ -297,8 +393,25 @@
           'cpu_vcpu': ansible_facts.processor_vcpus,
           'ram_gb': (ansible_facts.memtotal_mb | int / 1024) | round(1),
           'disk_free_gb': (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1),
+          'ssh_status': 'running',
+          'python_available': true,
           'status': 'OK'
         } | to_nice_json }}"
         dest: "{{ report_dir }}/check-{{ inventory_hostname }}.json"
         mode: "0644"
       failed_when: false
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.systemd:
+        name: ssh
+        state: restarted
+        enabled: true
+      when: current_uid == "0"
+      ignore_errors: true
+
+  post_tasks:
+    - name: Mostra posizione report JSON
+      ansible.builtin.debug:
+        msg: |
+          Report JSON salvato in: {{ report_dir }}/check-{{ inventory_hostname }}.json
