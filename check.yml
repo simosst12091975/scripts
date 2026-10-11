@@ -1,11 +1,21 @@
 ---
-- name: Prepara Python per Ansible su Ubuntu
+- name: Bootstrap Python per Ansible su Ubuntu
   hosts: laboratorio_ai
   gather_facts: false
   become: true
+  vars:
+    required_python_version: "3.8"
+    required_packages:
+      - python3
+      - python3-apt
+      - openssh-server
+      - openssh-client
+      - curl
+      - wget
+      - ca-certificates
 
   tasks:
-    - name: Verifica Ubuntu 24/26 e installa Python 3 se manca
+    - name: Verifica e installa Python 3 su Ubuntu bare metal/VM
       ansible.builtin.raw: |
         if [ ! -r /etc/os-release ]; then
           echo "Impossibile identificare il sistema: manca /etc/os-release." >&2
@@ -13,7 +23,7 @@
         fi
         . /etc/os-release
         if [ "$ID" != "ubuntu" ]; then
-          echo "Sistema non supportato: atteso Ubuntu 24 o 26, rilevato $ID ${VERSION_ID:-sconosciuto}." >&2
+          echo "Sistema non supportato: atteso Ubuntu, rilevato $ID ${VERSION_ID:-sconosciuto}." >&2
           exit 1
         fi
         case "${VERSION_ID:-}" in
@@ -41,28 +51,46 @@
       register: python_bootstrap
       changed_when: "'INSTALL_RESULT=installed' in python_bootstrap.stdout"
 
-- name: Verifica server Ubuntu
+- name: Verifica approfondita server Ubuntu bare metal e VM
   hosts: laboratorio_ai
   gather_facts: true
   become: true
+  vars:
+    environment_type: "{{ 'vm' if ansible_facts.virtualization_role == 'guest' else 'bare_metal' }}"
 
   tasks:
+    # ========== VERIFICA SISTEMA OPERATIVO ==========
     - name: Verifica che il sistema sia Ubuntu 24.04 o 26.04
       ansible.builtin.assert:
         that:
           - ansible_facts.distribution == "Ubuntu"
-          - ansible_facts.distribution_version is regex('^(24\\.04|26\\.04)$')
+          - ansible_facts.distribution_version is regex('^(24\.04|26\.04)$')
         fail_msg: >-
           Sistema non supportato: {{ ansible_facts.distribution }}
           {{ ansible_facts.distribution_version }}.
           Questo playbook verifica Ubuntu 24.04 e 26.04.
         success_msg: >-
-          Sistema supportato: Ubuntu {{ ansible_facts.distribution_version }}.
+          ✓ Sistema supportato: Ubuntu {{ ansible_facts.distribution_version }}
 
+    - name: Verifica che il sistema sia aggiornato (Security patches)
+      ansible.builtin.command: apt list --upgradable
+      register: upgradable_packages
+      changed_when: false
+      check_mode: false
+
+    - name: Avviso se ci sono aggiornamenti disponibili
+      ansible.builtin.debug:
+        msg: |
+          ⚠ Avviso: sono disponibili {{ upgradable_packages.stdout_lines | length - 1 }} aggiornamenti.
+          Si consiglia di eseguire: sudo apt update && sudo apt upgrade -y
+      when: upgradable_packages.stdout_lines | length > 1
+
+    # ========== VERIFICA PRIVILEGI ==========
     - name: Verifica che l'escalation dei privilegi funzioni
       ansible.builtin.command: id -u
       register: root_uid
       changed_when: false
+      check_mode: false
 
     - name: Conferma i privilegi root
       ansible.builtin.assert:
@@ -70,8 +98,52 @@
           - root_uid.stdout == "0"
         fail_msg: >-
           Il task è stato eseguito senza privilegi root.
-          Verificare become e le credenziali sudo in Semaphore.
+          Verificare become e le credenziali sudo.
+        success_msg: >-
+          ✓ Task eseguito con privilegi root (UID: {{ root_uid.stdout }})
 
+    - name: Verifica disponibilità sudo
+      ansible.builtin.command: which sudo
+      register: sudo_path
+      changed_when: false
+      failed_when: false
+
+    - name: Mostra stato sudo
+      ansible.builtin.debug:
+        msg:
+          - "✓ sudo disponibile: {{ sudo_path.stdout }}"
+      when: sudo_path.rc == 0
+
+    # ========== VERIFICA PACCHETTI ESSENZIALI ==========
+    - name: Raccoglie lo stato dei pacchetti
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Verifica pacchetti essenziali
+      ansible.builtin.assert:
+        that:
+          - item in ansible_facts.packages
+        fail_msg: "Pacchetto mancante: {{ item }}"
+        success_msg: "✓ Pacchetto presente: {{ item }}"
+      loop: "{{ required_packages }}"
+      ignore_errors: true
+      register: package_check
+
+    - name: Installa pacchetti essenziali mancanti
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: true
+      loop: "{{ required_packages }}"
+      when: item not in ansible_facts.packages
+      register: package_install
+
+    - name: Mostra pacchetti installati
+      ansible.builtin.debug:
+        msg: "✓ Pacchetti essenziali verificati/installati"
+      when: package_install is defined
+
+    # ========== VERIFICA SERVIZI CRITICI ==========
     - name: Raccoglie lo stato dei servizi
       ansible.builtin.service_facts:
 
@@ -81,6 +153,8 @@
           - "'ssh.service' in ansible_facts.services or 'ssh' in ansible_facts.services"
         fail_msg: >-
           Il servizio SSH non risulta installato o non è stato rilevato.
+        success_msg: >-
+          ✓ Servizio SSH rilevato
 
     - name: Determina il nome del servizio SSH
       ansible.builtin.set_fact:
@@ -93,26 +167,265 @@
           - ssh_service_name in ansible_facts.services
           - ansible_facts.services[ssh_service_name].state == "running"
         fail_msg: "Il servizio {{ ssh_service_name }} non è in esecuzione."
+        success_msg: "✓ Servizio SSH in esecuzione"
 
-    - name: Mostra riepilogo del sistema
-      ansible.builtin.debug:
-        msg:
-          - "Host: {{ ansible_facts.hostname }} ({{ inventory_hostname }})"
-          - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
-          - "Kernel: {{ ansible_facts.kernel }} ({{ ansible_facts.architecture }})"
-          - "Virtualizzazione: {{ ansible_facts.virtualization_type | default('non rilevata') }} / {{ ansible_facts.virtualization_role | default('non rilevato') }}"
-          - "CPU: {{ ansible_facts.processor_vcpus }} vCPU"
-          - "Memoria: {{ ansible_facts.memfree_mb }} MB liberi su {{ ansible_facts.memtotal_mb }} MB"
-          - "Uptime: {{ (ansible_facts.uptime_seconds | int // 86400) }} giorni"
-          - "Indirizzi IPv4: {{ ansible_facts.all_ipv4_addresses | join(', ') }}"
-          - "Carico medio: {{ ansible_facts.loadavg }}"
+    - name: Verifica porta SSH in ascolto
+      ansible.builtin.command: ss -tlnp | grep -i ssh
+      register: ssh_listen
+      changed_when: false
+      failed_when: false
 
-    - name: Mostra spazio dei filesystem montati
+    - name: Mostra stato porta SSH
       ansible.builtin.debug:
-        msg: >-
+        msg: |
+          ✓ SSH in ascolto:
+          {{ ssh_listen.stdout }}
+      when: ssh_listen.rc == 0
+
+    # ========== VERIFICA CONFIGURAZIONE SSH ==========
+    - name: Verifica file configurazione SSH
+      ansible.builtin.stat:
+        path: /etc/ssh/sshd_config
+      register: sshd_config
+
+    - name: Verifica permessi sshd_config
+      ansible.builtin.assert:
+        that:
+          - sshd_config.stat.mode == "0600"
+        fail_msg: >-
+          Permessi errati per /etc/ssh/sshd_config.
+          Attesi: 0600, Trovati: {{ sshd_config.stat.mode }}
+        success_msg: >-
+          ✓ Permessi sshd_config corretti: {{ sshd_config.stat.mode }}
+
+    - name: Estrae configurazione SSH critica
+      ansible.builtin.shell: |
+        grep -E "^(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|X11Forwarding)" /etc/ssh/sshd_config || echo "Valori di default"
+      register: ssh_config
+      changed_when: false
+
+    - name: Mostra configurazione SSH
+      ansible.builtin.debug:
+        msg: |
+          Configurazione SSH rilevante:
+          {{ ssh_config.stdout }}
+
+    # ========== VERIFICA CONNETTIVITÀ ==========
+    - name: Verifica DNS
+      ansible.builtin.command: getent hosts google.com
+      register: dns_check
+      changed_when: false
+      failed_when: false
+
+    - name: Mostra stato DNS
+      ansible.builtin.debug:
+        msg: |
+          ✓ DNS funzionante:
+          {{ dns_check.stdout }}
+      when: dns_check.rc == 0
+
+    - name: Verifica raggiungibilità gateway di default
+      ansible.builtin.command: ip route | grep default
+      register: default_gateway
+      changed_when: false
+      failed_when: false
+
+    - name: Mostra default gateway
+      ansible.builtin.debug:
+        msg: |
+          ✓ Default gateway configurato:
+          {{ default_gateway.stdout }}
+      when: default_gateway.rc == 0
+
+    # ========== VERIFICA INFRASTRUTTURA ==========
+    - name: Identifica tipo di ambiente
+      ansible.builtin.debug:
+        msg: |
+          Tipo di ambiente: {{ environment_type | upper }}
+          Virtualization: {{ ansible_facts.virtualization_type | default('N/A') }}
+          Role: {{ ansible_facts.virtualization_role | default('host') }}
+
+    - name: Verifica supporto CPU per virtualizzazione (se bare metal)
+      ansible.builtin.command: grep -E "(vmx|svm)" /proc/cpuinfo
+      register: cpu_virt
+      changed_when: false
+      failed_when: false
+      when: environment_type == 'bare_metal'
+
+    - name: Mostra supporto virtualizzazione
+      ansible.builtin.debug:
+        msg: "✓ CPU supporta virtualizzazione"
+      when: 
+        - environment_type == 'bare_metal'
+        - cpu_virt.rc == 0
+
+    - name: Verifica IOMMU (se bare metal)
+      ansible.builtin.command: dmesg | grep -i iommu
+      register: iommu_check
+      changed_when: false
+      failed_when: false
+      when: environment_type == 'bare_metal'
+
+    - name: Mostra stato IOMMU
+      ansible.builtin.debug:
+        msg: "✓ IOMMU abilitato nel kernel"
+      when: 
+        - environment_type == 'bare_metal'
+        - iommu_check.rc == 0
+
+    # ========== VERIFICA DISCHI E STORAGE ==========
+    - name: Verifica stato SMART dei dischi (se disponibile)
+      ansible.builtin.command: smartctl -q silent /dev/sda
+      register: smart_check
+      changed_when: false
+      failed_when: false
+      ignore_errors: true
+
+    - name: Mostra stato SMART
+      ansible.builtin.debug:
+        msg: |
+          Informazioni SMART per /dev/sda disponibili
+          (Eseguire: smartctl -a /dev/sda per dettagli)
+      when: smart_check.rc == 0
+
+    - name: Verifica spazio filesystem disponibile
+      ansible.builtin.debug:
+        msg: |
           {{ item.mount }} ({{ item.fstype }}):
-          {{ (item.size_available | int / 1073741824) | round(1) }} GB liberi
-          su {{ (item.size_total | int / 1073741824) | round(1) }} GB
+          {% set available_gb = (item.size_available | int / 1073741824) | round(2) %}
+          {% set total_gb = (item.size_total | int / 1073741824) | round(2) %}
+          {% set used_percent = ((1 - (item.size_available / item.size_total)) * 100) | round(1) %}
+          {{ available_gb }} GB liberi su {{ total_gb }} GB ({{ used_percent }}% utilizzato)
       loop: "{{ ansible_facts.mounts }}"
       loop_control:
         label: "{{ item.mount }}"
+      when: item.mount in ['/', '/boot', '/home', '/var', '/tmp']
+
+    # ========== VERIFICA MEMORIA E CPU ==========
+    - name: Verifica memoria RAM disponibile
+      ansible.builtin.assert:
+        that:
+          - (ansible_facts.memtotal_mb | int) >= 2048
+        fail_msg: >-
+          Memoria insufficiente: {{ ansible_facts.memtotal_mb }} MB.
+          Minimo richiesto: 2048 MB.
+        success_msg: >-
+          ✓ Memoria RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB
+
+    - name: Mostra informazioni CPU
+      ansible.builtin.debug:
+        msg:
+          - "CPU: {{ ansible_facts.processor_vcpus }} vCPU(s)"
+          - "Modello: {{ ansible_facts.processor[0] if ansible_facts.processor | length > 0 else 'N/A' }}"
+          - "Velocità: {{ ansible_facts.processor_nproc }} processori logici"
+
+    - name: Mostra carico di sistema
+      ansible.builtin.debug:
+        msg:
+          - "Carico medio (1min): {{ ansible_facts.loadavg[0] | round(2) }}"
+          - "Carico medio (5min): {{ ansible_facts.loadavg[1] | round(2) }}"
+          - "Carico medio (15min): {{ ansible_facts.loadavg[2] | round(2) }}"
+
+    # ========== VERIFICA RETE ==========
+    - name: Raccoglie informazioni interfacce di rete
+      ansible.builtin.debug:
+        msg: |
+          {% for iface in ansible_facts.interfaces %}
+          {{ iface }}: {{ ansible_facts[iface]['ipv4'] | default('DHCP/No IPv4') }}
+          {% endfor %}
+      when: ansible_facts.interfaces | length > 0
+
+    - name: Mostra indirizzi IPv4 configurati
+      ansible.builtin.debug:
+        msg:
+          - "Indirizzi IPv4: {{ ansible_facts.all_ipv4_addresses | join(', ') }}"
+
+    - name: Verifica connettività esterna
+      ansible.builtin.uri:
+        url: "https://www.google.com"
+        method: HEAD
+        status_code: [200, 301, 302]
+        timeout: 5
+      register: external_connectivity
+      changed_when: false
+      failed_when: false
+      ignore_errors: true
+
+    - name: Mostra stato connettività
+      ansible.builtin.debug:
+        msg: "✓ Connettività esterna: OK"
+      when: external_connectivity.status is defined and external_connectivity.status in [200, 301, 302]
+
+    # ========== VERIFICA SISTEMA FILE E MOUNT ==========
+    - name: Verifica journal di sistema
+      ansible.builtin.command: journalctl --no-pager -n 10 --priority=err
+      register: journal_errors
+      changed_when: false
+      failed_when: false
+
+    - name: Mostra errori recenti (se presenti)
+      ansible.builtin.debug:
+        msg: |
+          Ultimi errori dal journal:
+          {{ journal_errors.stdout }}
+      when: journal_errors.stdout | length > 0
+
+    - name: Verifica sestatus (SELinux, se presente)
+      ansible.builtin.command: getenforce
+      register: selinux_status
+      changed_when: false
+      failed_when: false
+      ignore_errors: true
+
+    - name: Mostra stato SELinux
+      ansible.builtin.debug:
+        msg: "SELinux: {{ selinux_status.stdout }}"
+      when: selinux_status.rc == 0
+
+    # ========== VERIFICA FIREWALL ==========
+    - name: Verifica stato UFW
+      ansible.builtin.command: ufw status
+      register: ufw_status
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: Mostra stato firewall
+      ansible.builtin.debug:
+        msg: |
+          {{ ufw_status.stdout }}
+      when: ufw_status.rc == 0
+
+    # ========== RIEPILOGO FINALE ==========
+    - name: Riepilogo completo del sistema
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════════════════════════"
+          - "                    RIEPILOGO SISTEMA VERIFICATO"
+          - "════════════════════════════════════════════════════════════════"
+          - "Host: {{ ansible_facts.hostname }} ({{ inventory_hostname }})"
+          - "Tipo Ambiente: {{ environment_type | upper }}"
+          - "Sistema Operativo: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          - "Kernel: {{ ansible_facts.kernel }} {{ ansible_facts.kernel_release }} ({{ ansible_facts.architecture }})"
+          - "Uptime: {{ (ansible_facts.uptime_seconds | int // 86400) }} giorni, {{ ((ansible_facts.uptime_seconds | int % 86400) // 3600) }} ore"
+          - ""
+          - "HARDWARE:"
+          - "  CPU: {{ ansible_facts.processor_vcpus }} vCPU(s)"
+          - "  RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB"
+          - "  Virtualizzazione: {{ ansible_facts.virtualization_type | default('N/A') }}"
+          - ""
+          - "RETE:"
+          - "  Hostname: {{ ansible_facts.hostname }}"
+          - "  FQDN: {{ ansible_facts.fqdn }}"
+          - "  Indirizzi IPv4: {{ ansible_facts.all_ipv4_addresses | join(', ') }}"
+          - ""
+          - "STORAGE:"
+          - "  Root: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB liberi"
+          - ""
+          - "SERVIZI CRITICI:"
+          - "  SSH: ✓ In esecuzione"
+          - "  Python: ✓ Disponibile"
+          - ""
+          - "════════════════════════════════════════════════════════════════"
+          - "Status: ✓ SISTEMA PRONTO PER ANSIBLE"
+          - "════════════════════════════════════════════════════════════════"
