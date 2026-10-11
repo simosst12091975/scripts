@@ -1,7 +1,7 @@
 ---
 - name: Playbook di TEST
-  hosts: all
-  become: yes
+  hosts: laboratorio_ai
+  become: true
 
   tasks:
   - name: Copy file test /tmp with permissions
@@ -17,6 +17,8 @@
       comment: James Doe
       groups: adm,cockpit-ws
       uid: 1041
+      append: false
+      state: present
  
 - name: SSH verification
   hosts: all
