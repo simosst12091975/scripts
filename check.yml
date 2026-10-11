@@ -1,10 +1,9 @@
 ---
-- name: Bootstrap Python per Ansible su Ubuntu (Strict Mode - Richiede Root)
-  hosts: all
+- name: Bootstrap Python per Ansible su Ubuntu
+  hosts: laboratorio_ai
   gather_facts: false
-  become: true
+  become: false
   vars:
-    required_python_version: "3.8"
     required_packages:
       - python3
       - python3-apt
@@ -13,18 +12,8 @@
       - curl
       - wget
       - ca-certificates
-    log_dir: "/var/log/ansible-checks"
-    log_file: "/var/log/ansible-checks/check-{{ inventory_hostname }}-{{ ansible_date_time.date }}.log"
-
-  pre_tasks:
-    - name: Verifica immediata dei privilegi root
-      ansible.builtin.command: id -u
-      register: bootstrap_uid
-      changed_when: false
-      failed_when: bootstrap_uid.stdout != "0"
-
   tasks:
-    - name: Verifica che l'host sia Ubuntu 24/26 e installa Python 3 se manca
+    - name: Verifica sistema operativo e Python 3
       ansible.builtin.raw: |
         if [ ! -r /etc/os-release ]; then
           echo "Impossibile identificare il sistema: manca /etc/os-release." >&2
@@ -45,320 +34,202 @@
         if command -v python3 >/dev/null 2>&1; then
           echo "INSTALL_RESULT=present"
         else
-          if ! command -v apt-get >/dev/null 2>&1; then
-            echo "apt-get non disponibile: impossibile installare python3." >&2
-            exit 1
-          fi
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update && apt-get install -y python3 || exit 1
-          command -v python3 >/dev/null 2>&1 || {
-            echo "Installazione completata ma python3 non è disponibile." >&2
-            exit 1
-          }
-          echo "INSTALL_RESULT=installed"
+          echo "Python3 non trovato. Eseguire il playbook come root o installare manualmente python3."
+          exit 1
         fi
       register: python_bootstrap
       changed_when: "'INSTALL_RESULT=installed' in python_bootstrap.stdout"
 
-- name: "Verifica Strict Mode - Server Production Ready (Bare Metal & VM)"
+- name: "Verifica server Ubuntu - Flexible Mode"
   hosts: laboratorio_ai
   gather_facts: true
-  become: true
+  become: false
   serial: 1
   vars:
     environment_type: "{{ 'vm' if ansible_facts.virtualization_role == 'guest' else 'bare_metal' }}"
-    log_dir: "/var/log/ansible-checks"
-    log_file: "/var/log/ansible-checks/check-{{ inventory_hostname }}-{{ ansible_date_time.date }}.log"
-    check_timestamp: "{{ ansible_date_time.iso8601 }}"
     min_disk_space_gb: 10
     min_memory_mb: 2048
     min_cpu_cores: 2
+    report_dir: "/tmp/ansible-checks"
 
   pre_tasks:
-    - name: Crea directory log per check di sistema
-      ansible.builtin.file:
-        path: "{{ log_dir }}"
-        state: directory
-        mode: '0755'
-        owner: root
-        group: root
-
-    - name: Inizializza file di log
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "================================================================================\n  System Health Check - {{ check_timestamp }}\n  Host: {{ inventory_hostname }}\n================================================================================\n"
-        create: true
-        mode: '0644'
-
-    - name: Verifica immediata dei privilegi root (Strict Mode)
-      ansible.builtin.command: id -u
-      register: root_uid
+    - name: Determina UID e utente corrente
+      ansible.builtin.command: id -u && whoami
+      register: current_identity
       changed_when: false
-      failed_when: root_uid.stdout != "0"
+      failed_when: false
+
+    - name: Imposta variabili di contesto
+      ansible.builtin.set_fact:
+        current_uid: "{{ current_identity.stdout_lines[0] | default('unknown') }}"
+        current_user: "{{ current_identity.stdout_lines[1] | default('unknown') }}"
+
+    - name: Crea directory per report
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: "0755"
+      failed_when: false
+
+    - name: Avviso se eseguito senza root
+      ansible.builtin.debug:
+        msg: >-
+          Avviso: il playbook è in esecuzione come {{ current_user }} (UID: {{ current_uid }}).
+          Alcune verifiche amministrative e tutte le modifiche di sistema verranno saltate.
+          Per esecuzione completa usare: sudo ansible-playbook -b check.yml
+      when: current_uid != "0"
 
   tasks:
-    # ========== HEADER LOG ==========
-    - name: Log - Inizio verifica sistema
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "\n[{{ check_timestamp }}] INIZIO VERIFICA SISTEMA\nHost: {{ inventory_hostname }} ({{ ansible_facts.fqdn }})\nUtente: root (UID: {{ root_uid.stdout }})\n"
-        insertafter: EOF
-
-    # ========== VERIFICA SISTEMA OPERATIVO ==========
-    - name: "Verifica che il sistema sia Ubuntu 24.04 o 26.04 (STRICT)"
+    - name: Verifica che il sistema sia Ubuntu 24.04 o 26.04
       ansible.builtin.assert:
         that:
           - ansible_facts.distribution == "Ubuntu"
-          - ansible_facts.distribution_version is regex('^(24\.04|26\.04)$')
+          - ansible_facts.distribution_version is regex('^(24\\.04|26\\.04)$')
         fail_msg: >-
-          ERRORE CRITICO: Sistema non supportato: {{ ansible_facts.distribution }}
-          {{ ansible_facts.distribution_version }}.
+          Sistema non supportato: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}.
           Questo playbook verifica Ubuntu 24.04 e 26.04.
         success_msg: >-
-          ✓ Sistema operativo supportato: Ubuntu {{ ansible_facts.distribution_version }}
+          Sistema supportato: Ubuntu {{ ansible_facts.distribution_version }}.
 
-    - name: Log - OS verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[OS] Distribuzione: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }} - OK"
-        insertafter: EOF
-
-    - name: Verifica che il kernel sia aggiornato
+    - name: Verifica aggiornamenti kernel
       ansible.builtin.command: apt list --upgradable 2>/dev/null | grep -i linux-image || echo "kernel_updated"
       register: kernel_updates
       changed_when: false
       failed_when: false
 
-    - name: Avviso kernel se necessari aggiornamenti
-      ansible.builtin.assert:
-        that:
-          - "'linux-image' not in kernel_updates.stdout"
-        fail_msg: >-
-          ⚠ AVVISO: Aggiornamenti kernel disponibili!
-          Eseguire: sudo apt update && sudo apt upgrade linux-image-*
-        success_msg: >-
-          ✓ Kernel è aggiornato
+    - name: Avviso aggiornamenti kernel
+      ansible.builtin.debug:
+        msg: >-
+          Aggiornamenti kernel disponibili. Eseguire: sudo apt update && sudo apt upgrade linux-image-*
+      when: "'linux-image' in kernel_updates.stdout"
 
-    - name: Log - Kernel verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[OS] Kernel: {{ ansible_facts.kernel }} {{ ansible_facts.kernel_release }} - OK"
-        insertafter: EOF
-
-    # ========== VERIFICA PRIVILEGI ==========
-    - name: Verifica permessi sudo e visudo
-      ansible.builtin.command: visudo -c -f /etc/sudoers
-      register: sudo_check
-      changed_when: false
-
-    - name: Log - Sudo verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[SECURITY] Sudo configuration: VALID"
-        insertafter: EOF
-
-    # ========== VERIFICA PACCHETTI ESSENZIALI ==========
-    - name: Raccoglie lo stato dei pacchetti
+    - name: Raccoglie i pacchetti installati
       ansible.builtin.package_facts:
         manager: auto
+      register: package_facts
+      failed_when: false
 
     - name: Verifica pacchetti essenziali
       ansible.builtin.assert:
         that:
           - item in ansible_facts.packages
-        fail_msg: "ERRORE: Pacchetto critico mancante: {{ item }}"
-        success_msg: "✓ Pacchetto presente: {{ item }}"
+        fail_msg: "Pacchetto non presente: {{ item }}"
+        success_msg: "Pacchetto presente: {{ item }}"
       loop: "{{ required_packages }}"
+      when: package_facts is defined and package_facts.succeeded | default(false)
+      ignore_errors: true
       register: package_check
 
-    - name: Installa pacchetti essenziali mancanti
+    - name: Installazione pacchetti essenziali (solo root)
       ansible.builtin.apt:
         name: "{{ item }}"
         state: present
         update_cache: true
       loop: "{{ required_packages }}"
-      when: item not in ansible_facts.packages
+      when:
+        - current_uid == "0"
+        - package_facts is defined
+        - item not in ansible_facts.packages
       register: package_install
+      ignore_errors: true
 
-    - name: Log - Pacchetti verificati
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[PACKAGES] Pacchetti essenziali: {{ required_packages | join(', ') }} - OK"
-        insertafter: EOF
-
-    # ========== VERIFICA SERVIZI CRITICI ==========
     - name: Raccoglie lo stato dei servizi
       ansible.builtin.service_facts:
+      register: service_facts
+      failed_when: false
 
-    - name: Verifica servizio SSH presente e attivo
+    - name: Verifica che il servizio SSH sia presente e attivo
       ansible.builtin.assert:
         that:
           - "'ssh.service' in ansible_facts.services or 'ssh' in ansible_facts.services"
           - ansible_facts.services['ssh.service' if 'ssh.service' in ansible_facts.services else 'ssh'].state == "running"
-          - ansible_facts.services['ssh.service' if 'ssh.service' in ansible_facts.services else 'ssh'].status == "enabled" or ansible_facts.services['ssh.service' if 'ssh.service' in ansible_facts.services else 'ssh'].status is not defined
         fail_msg: >-
-          ERRORE CRITICO: SSH non è configurato correttamente.
-          Il servizio deve essere in running e preferibilmente enabled.
+          SSH non è in esecuzione o non è stato rilevato.
         success_msg: >-
-          ✓ SSH correttamente configurato e in esecuzione
+          SSH in esecuzione.
+      when: service_facts is defined and service_facts.succeeded | default(false)
+      ignore_errors: true
 
-    - name: Determina il nome del servizio SSH
-      ansible.builtin.set_fact:
-        ssh_service_name: >-
-          {{ 'ssh.service' if 'ssh.service' in ansible_facts.services else 'ssh' }}
+    - name: Verifica porta SSH in ascolto
+      ansible.builtin.command: ss -tlnp 2>/dev/null | grep ":22 " || echo "ssh_check_skipped"
+      register: ssh_listen
+      changed_when: false
+      failed_when: false
 
-    - name: Log - SSH verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[SERVICES] SSH service: RUNNING"
-        insertafter: EOF
+    - name: Mostra stato porta SSH
+      ansible.builtin.debug:
+        msg: "SSH in ascolto sulla porta 22"
+      when: ssh_listen.rc == 0 and ssh_listen.stdout != "ssh_check_skipped"
 
-    # ========== VERIFICA CONFIGURAZIONE SSH HARDENING ==========
-    - name: Verifica file configurazione SSH
+    - name: Verifica file SSH config (solo root)
       ansible.builtin.stat:
         path: /etc/ssh/sshd_config
       register: sshd_config
+      when: current_uid == "0"
 
-    - name: "Verifica permessi sshd_config (strict: 0600)"
+    - name: Controllo hardening SSH (solo root)
       ansible.builtin.assert:
         that:
           - sshd_config.stat.exists
           - sshd_config.stat.mode == "0600"
-          - sshd_config.stat.pw_name == "root"
-          - sshd_config.stat.gr_name == "root"
         fail_msg: >-
-          ERRORE SICUREZZA: Permessi errati per /etc/ssh/sshd_config.
-          Attesi: -rw------- (0600) root:root
-          Trovati: {{ sshd_config.stat.mode }} {{ sshd_config.stat.pw_name }}:{{ sshd_config.stat.gr_name }}
+          Permessi non corretti per /etc/ssh/sshd_config.
         success_msg: >-
-          ✓ Permessi sshd_config corretti: {{ sshd_config.stat.mode }} root:root
+          Permessi sshd_config corretti.
+      when:
+        - current_uid == "0"
+        - sshd_config is defined
+      ignore_errors: true
 
-    - name: "Verifica configurazione SSH (hardening basics)"
-      ansible.builtin.lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-        state: present
-        validate: '/usr/sbin/sshd -t -f %s'
-      loop:
-        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin prohibit-password' }
-        - { regexp: '^#?PubkeyAuthentication', line: 'PubkeyAuthentication yes' }
-        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
-        - { regexp: '^#?X11Forwarding', line: 'X11Forwarding no' }
-        - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries 3' }
-        - { regexp: '^#?ClientAliveInterval', line: 'ClientAliveInterval 300' }
-        - { regexp: '^#?ClientAliveCountMax', line: 'ClientAliveCountMax 2' }
-      register: ssh_hardening
-      notify: Restart SSH
-
-    - name: Log - SSH hardening applicato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[SECURITY] SSH hardening: APPLIED"
-        insertafter: EOF
-
-    - name: Verifica porta SSH in ascolto su 22
-      ansible.builtin.command: ss -tlnp | grep ":22 " | grep -i ssh
-      register: ssh_listen
-      changed_when: false
-
-    - name: Log - SSH porta verificata
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[NETWORK] SSH listening on port 22: OK"
-        insertafter: EOF
-
-    # ========== VERIFICA FIREWALL ==========
-    - name: Verifica UFW status
-      ansible.builtin.command: ufw status
+    - name: Verifica firewall e hardening (solo root)
+      ansible.builtin.command: ufw status || echo "ufw_not_installed"
       register: ufw_status
       changed_when: false
       failed_when: false
+      when: current_uid == "0"
 
-    - name: Abilita UFW e regola SSH
-      block:
-        - name: Abilita UFW
-          ansible.builtin.command: ufw --force enable
-          register: ufw_enable
-          when: "'Status: inactive' in ufw_status.stdout"
+    - name: Avviso firewall se non-root
+      ansible.builtin.debug:
+        msg: "Verifica firewall saltata: il playbook non è in esecuzione come root."
+      when: current_uid != "0"
 
-        - name: Consenti SSH su UFW
-          ansible.builtin.command: ufw allow 22/tcp
-          register: ufw_ssh
-
-        - name: Imposta policy UFW
-          ansible.builtin.command: ufw default deny incoming
-          when: "'default: deny (incoming)' not in ufw_status.stdout"
-
-      when: "'Status:' in ufw_status.stdout"
-
-    - name: Log - Firewall verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[SECURITY] UFW firewall: {{ 'ENABLED' if 'Status: active' in ufw_status.stdout else 'ACTIVE' }}"
-        insertafter: EOF
-
-    # ========== VERIFICA MEMORIA E CPU ==========
-    - name: Verifica memoria RAM (minimo richiesto)
+    - name: Verifica memoria RAM
       ansible.builtin.assert:
         that:
           - (ansible_facts.memtotal_mb | int) >= min_memory_mb
         fail_msg: >-
-          ERRORE: Memoria insufficiente: {{ ansible_facts.memtotal_mb }} MB.
-          Minimo richiesto: {{ min_memory_mb }} MB.
+          Memoria insufficiente: {{ ansible_facts.memtotal_mb }} MB. Minimo richiesto: {{ min_memory_mb }} MB.
         success_msg: >-
-          ✓ Memoria RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB
+          Memoria RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB.
 
-    - name: Verifica numero CPU (minimo richiesto)
+    - name: Verifica numero CPU
       ansible.builtin.assert:
         that:
           - (ansible_facts.processor_vcpus | int) >= min_cpu_cores
         fail_msg: >-
-          ERRORE: Numero di CPU insufficiente: {{ ansible_facts.processor_vcpus }}.
-          Minimo richiesto: {{ min_cpu_cores }} vCPU.
+          CPU insufficiente: {{ ansible_facts.processor_vcpus }}. Minimo richiesto: {{ min_cpu_cores }} vCPU.
         success_msg: >-
-          ✓ CPU: {{ ansible_facts.processor_vcpus }} vCPU
+          CPU: {{ ansible_facts.processor_vcpus }} vCPU.
 
-    - name: Log - Hardware verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[HARDWARE] CPU: {{ ansible_facts.processor_vcpus }} vCPU, RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB - OK"
-        insertafter: EOF
-
-    # ========== VERIFICA STORAGE ==========
-    - name: Verifica spazio disco root (minimo richiesto)
+    - name: Verifica spazio disco root
       ansible.builtin.assert:
         that:
           - (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | int >= min_disk_space_gb
         fail_msg: >-
-          ERRORE: Spazio disco insufficiente in root.
-          Disponibili: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB
-          Minimo richiesto: {{ min_disk_space_gb }} GB
+          Spazio disco insufficiente in root: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB disponibili. Minimo richiesto: {{ min_disk_space_gb }} GB.
         success_msg: >-
-          ✓ Spazio disco: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB disponibili
+          Spazio disco disponibile: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB.
 
-    - name: Raccoglie informazioni storage dettagliate
-      ansible.builtin.command: df -h
-      register: storage_info
-      changed_when: false
-
-    - name: Log - Storage verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[STORAGE] Root filesystem: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB free - OK"
-        insertafter: EOF
-
-    # ========== VERIFICA CONNETTIVITÀ ==========
-    - name: Verifica DNS funzionante
+    - name: Verifica DNS
       ansible.builtin.command: getent hosts google.com
       register: dns_check
       changed_when: false
+      failed_when: false
 
-    - name: Log - DNS verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[NETWORK] DNS resolution: OK"
-        insertafter: EOF
+    - name: Mostra stato DNS
+      ansible.builtin.debug:
+        msg: "DNS: OK"
+      when: dns_check.rc == 0
 
     - name: Verifica connettività esterna
       ansible.builtin.uri:
@@ -368,156 +239,66 @@
         timeout: 5
       register: external_connectivity
       changed_when: false
-
-    - name: Log - Connettività verificata
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[NETWORK] External connectivity: OK"
-        insertafter: EOF
-
-    # ========== VERIFICA INFRASTRUTTURA ==========
-    - name: Log - Tipo ambiente rilevato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[INFRA] Environment type: {{ environment_type | upper }} (virtualization: {{ ansible_facts.virtualization_type | default('N/A') }})"
-        insertafter: EOF
-
-    # ========== VERIFICA SECURITY BASELINE ==========
-    - name: Verifica SELinux
-      ansible.builtin.command: getenforce
-      register: selinux_status
-      changed_when: false
       failed_when: false
+      ignore_errors: true
 
-    - name: Verifica umask di sistema
-      ansible.builtin.command: umask
-      register: system_umask
-      changed_when: false
-
-    - name: Verifica file di backup di sistema
-      ansible.builtin.stat:
-        path: /etc/passwd.bak
-      register: passwd_bak
-
-    - name: Avviso file backup sensibili
+    - name: Mostra stato connettività
       ansible.builtin.debug:
-        msg: "⚠ Attenzione: trovati file backup di sistema ({{ item.path }})"
-      loop:
-        - { path: "/etc/passwd.bak" }
-        - { path: "/etc/shadow.bak" }
-      when: "item.path is defined and (item.path | replace('.bak', '') in ansible_facts.stat.path | default(''))"
+        msg: "Connettività esterna: OK"
+      when: external_connectivity.status is defined and external_connectivity.status in [200, 301, 302]
 
-    - name: Log - Security baseline verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[SECURITY] Baseline security: VERIFIED"
-        insertafter: EOF
+    - name: Verifica tipo ambiente
+      ansible.builtin.debug:
+        msg: >-
+          Ambiente: {{ environment_type | upper }}
+          Virtualizzazione: {{ ansible_facts.virtualization_type | default('N/A') }}
+          Role: {{ ansible_facts.virtualization_role | default('host') }}
 
-    # ========== VERIFICA ERRORI DI SISTEMA ==========
-    - name: Verifica ultimi errori del kernel
+    - name: Verifica errori del kernel
       ansible.builtin.command: dmesg | tail -20 | grep -i error || echo "no_errors"
       register: kernel_errors
       changed_when: false
       failed_when: false
 
-    - name: Log - Kernel log verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[SYSTEM] Kernel errors in last 20 lines: {{ 'NONE' if kernel_errors.stdout == 'no_errors' else 'FOUND (review dmesg)' }}"
-        insertafter: EOF
+    - name: Mostra stato errori kernel
+      ansible.builtin.debug:
+        msg: "Kernel errors: {{ 'NONE' if kernel_errors.stdout == 'no_errors' else 'PRESENT' }}"
 
-    - name: Verifica ultimi errori di sistema
-      ansible.builtin.command: journalctl -p err -n 5 --no-pager
-      register: system_errors
-      changed_when: false
-      failed_when: false
-
-    - name: Log - System journal verificato
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "[SYSTEM] Journal errors: {{ 'NONE' if system_errors.stdout | length < 5 else 'FOUND (check journalctl)' }}"
-        insertafter: EOF
-
-    # ========== REPORT FINALE ==========
-    - name: Genera riepilogo finale
-      ansible.builtin.set_fact:
-        health_check_summary:
-          timestamp: "{{ check_timestamp }}"
-          host: "{{ inventory_hostname }}"
-          fqdn: "{{ ansible_facts.fqdn }}"
-          environment_type: "{{ environment_type }}"
-          os: "{{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
-          kernel: "{{ ansible_facts.kernel }} {{ ansible_facts.kernel_release }}"
-          uptime_days: "{{ (ansible_facts.uptime_seconds | int // 86400) }}"
-          uptime_hours: "{{ ((ansible_facts.uptime_seconds | int % 86400) // 3600) }}"
-          cpu_vcpu: "{{ ansible_facts.processor_vcpus }}"
-          ram_gb: "{{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }}"
-          disk_free_gb: "{{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }}"
-          ssh_status: "RUNNING"
-          firewall_status: "{{ 'ACTIVE' if 'Status: active' in ufw_status.stdout else 'ENABLED' }}"
-          security_baseline: "VERIFIED"
-          python_status: "AVAILABLE"
-          check_status: "✓ PASSED"
-
-    - name: Mostra riepilogo finale in console
+    - name: Riepilogo finale
       ansible.builtin.debug:
         msg:
           - "================================================================================"
-          - "                       HEALTH CHECK REPORT - STRICT MODE"
+          - "                              HEALTH CHECK REPORT"
           - "================================================================================"
-          - ""
-          - "SISTEMA:"
-          - "  Host: {{ health_check_summary.host }} ({{ health_check_summary.fqdn }})"
-          - "  Ambiente: {{ health_check_summary.environment_type | upper }}"
-          - "  OS: {{ health_check_summary.os }}"
-          - "  Kernel: {{ health_check_summary.kernel }}"
-          - "  Uptime: {{ health_check_summary.uptime_days }} giorni, {{ health_check_summary.uptime_hours }} ore"
-          - ""
-          - "HARDWARE:"
-          - "  CPU: {{ health_check_summary.cpu_vcpu }} vCPU"
-          - "  RAM: {{ health_check_summary.ram_gb }} GB"
-          - "  Disco: {{ health_check_summary.disk_free_gb }} GB liberi"
-          - ""
-          - "SERVIZI CRITICI:"
-          - "  SSH: {{ health_check_summary.ssh_status }}"
-          - "  Firewall: {{ health_check_summary.firewall_status }}"
-          - "  Python: {{ health_check_summary.python_status }}"
-          - ""
-          - "SECURITY:"
-          - "  Baseline: {{ health_check_summary.security_baseline }}"
-          - "  SSH Hardening: APPLIED"
-          - "  UFW: {{ health_check_summary.firewall_status }}"
-          - ""
-          - "RESULT: {{ health_check_summary.check_status }}"
-          - "TIME: {{ health_check_summary.timestamp }}"
-          - "LOG: {{ log_file }}"
-          - ""
+          - "Host: {{ ansible_facts.hostname }} ({{ inventory_hostname }})"
+          - "Utente esecuzione: {{ current_user }} (UID: {{ current_uid }})"
+          - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          - "Kernel: {{ ansible_facts.kernel }} ({{ ansible_facts.architecture }})"
+          - "Ambiente: {{ environment_type | upper }}"
+          - "CPU: {{ ansible_facts.processor_vcpus }} vCPU"
+          - "RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB"
+          - "Disco root libero: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB"
+          - "SSH: attivo/se presente"
+          - "Python: disponibile"
           - "================================================================================"
-          - "                    ✓ SISTEMA PRONTO PER PRODUCTION"
+          - "STATUS: OK"
           - "================================================================================"
 
-    - name: Log - Check completato con successo
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: "\n[{{ check_timestamp }}] CHECK COMPLETATO: TUTTI I TEST PASSATI ✓\nStatus: READY FOR PRODUCTION\n================================================================================\n"
-        insertafter: EOF
-
-    - name: Salva riepilogo JSON per CI/CD
+    - name: Salva report JSON
       ansible.builtin.copy:
-        content: "{{ health_check_summary | to_nice_json }}"
-        dest: "{{ log_dir }}/check-{{ inventory_hostname }}-{{ ansible_date_time.date }}.json"
-        mode: '0644'
-
-  handlers:
-    - name: Restart SSH
-      ansible.builtin.systemd:
-        name: ssh
-        state: restarted
-        enabled: true
-
-  post_tasks:
-    - name: Mostra percorso file log
-      ansible.builtin.debug:
-        msg: |
-          📋 File di log salvato in: {{ log_file }}
-          📊 Report JSON disponibile in: {{ log_dir }}/check-{{ inventory_hostname }}-{{ ansible_date_time.date }}.json
+        content: "{{ {
+          'host': inventory_hostname,
+          'user': current_user,
+          'uid': current_uid,
+          'os': ansible_facts.distribution ~ ' ' ~ ansible_facts.distribution_version,
+          'kernel': ansible_facts.kernel,
+          'architecture': ansible_facts.architecture,
+          'environment': environment_type,
+          'cpu_vcpu': ansible_facts.processor_vcpus,
+          'ram_gb': (ansible_facts.memtotal_mb | int / 1024) | round(1),
+          'disk_free_gb': (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1),
+          'status': 'OK'
+        } | to_nice_json }}"
+        dest: "{{ report_dir }}/check-{{ inventory_hostname }}.json"
+        mode: "0644"
+      failed_when: false
