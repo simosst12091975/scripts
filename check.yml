@@ -1,36 +1,75 @@
 ---
-- name: Playbook di TEST
+- name: Verifica server Ubuntu
   hosts: laboratorio_ai
+  gather_facts: true
   become: true
 
   tasks:
-  - name: Copy file test /tmp with permissions
-    ansible.builtin.copy:
-      src: ./test.yml
-      dest: /tmp/test.yml
-      mode: '0644'
+    - name: Verifica che il sistema sia Ubuntu 24.04 o 26.04
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == "Ubuntu"
+          - ansible_facts.distribution_major_version in ["24", "26"]
+        fail_msg: >-
+          Sistema non supportato: {{ ansible_facts.distribution }}
+          {{ ansible_facts.distribution_version }}.
+          Questo playbook verifica Ubuntu 24.04 e 26.04.
+        success_msg: >-
+          Sistema supportato: Ubuntu {{ ansible_facts.distribution_version }}.
 
-  - name: Add the user 'james' with a bash shell, appending the group 'adm' and 'cockpit-ws' to the user's groups
-    ansible.builtin.user:
-      name: james
-      shell: /bin/bash
-      comment: James Doe
-      groups: adm,cockpit-ws
-      uid: 1041
-      append: false
-      state: present
- 
-- name: SSH verification
-  hosts: all
-  become: yes
+    - name: Verifica che l'escalation dei privilegi funzioni
+      ansible.builtin.command: id -u
+      register: root_uid
+      changed_when: false
 
-  tasks:
-  - name: Ensure service ssh systemd is at the latest version
-    ansible.builtin.apt:
-      name: ssh
-      state: latest
+    - name: Conferma i privilegi root
+      ansible.builtin.assert:
+        that:
+          - root_uid.stdout == "0"
+        fail_msg: >-
+          Il task è stato eseguito senza privilegi root.
+          Verificare become e le credenziali sudo in Semaphore.
 
-  - name: Ensure that service ssh systemd is started
-    ansible.builtin.service:
-      name: ssh
-      state: started
+    - name: Raccoglie lo stato dei servizi
+      ansible.builtin.service_facts:
+
+    - name: Verifica che il servizio SSH sia presente
+      ansible.builtin.assert:
+        that:
+          - "'ssh.service' in ansible_facts.services or 'ssh' in ansible_facts.services"
+        fail_msg: >-
+          Il servizio SSH non risulta installato o non è stato rilevato.
+
+    - name: Determina il nome del servizio SSH
+      ansible.builtin.set_fact:
+        ssh_service_name: >-
+          {{ 'ssh.service' if 'ssh.service' in ansible_facts.services else 'ssh' }}
+
+    - name: Verifica che il servizio SSH sia in esecuzione
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services[ssh_service_name].state == "running"
+        fail_msg: "Il servizio {{ ssh_service_name }} non è in esecuzione."
+
+    - name: Mostra riepilogo del sistema
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ ansible_facts.hostname }} ({{ inventory_hostname }})"
+          - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          - "Kernel: {{ ansible_facts.kernel }} ({{ ansible_facts.architecture }})"
+          - "Virtualizzazione: {{ ansible_facts.virtualization_type | default('non rilevata') }} / {{ ansible_facts.virtualization_role | default('non rilevato') }}"
+          - "CPU: {{ ansible_facts.processor_vcpus }} vCPU"
+          - "Memoria: {{ ansible_facts.memfree_mb }} MB liberi su {{ ansible_facts.memtotal_mb }} MB"
+          - "Uptime: {{ (ansible_facts.uptime_seconds | int // 86400) }} giorni"
+          - "Indirizzi IPv4: {{ ansible_facts.all_ipv4_addresses | join(', ') }}"
+          - "Carico medio: {{ ansible_facts.loadavg }}"
+
+    - name: Mostra spazio dei filesystem montati
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.mount }} ({{ item.fstype }}):
+          {{ (item.size_available | int / 1073741824) | round(1) }} GB liberi
+          su {{ (item.size_total | int / 1073741824) | round(1) }} GB
+      loop: "{{ ansible_facts.mounts }}"
+      loop_control:
+        label: "{{ item.mount }}"
