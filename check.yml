@@ -43,7 +43,7 @@
 - name: "Verifica server Ubuntu - Flexible Mode (Tutti gli Host)"
   hosts: all
   gather_facts: true
-  become: false
+  become: true
   serial: 1
   vars:
     ansible_python_interpreter: /usr/bin/python3
@@ -58,12 +58,11 @@
       ansible.builtin.command: id -u && whoami
       register: current_identity
       changed_when: false
-      failed_when: false
 
     - name: Imposta variabili di contesto
       ansible.builtin.set_fact:
-        current_uid: "{{ current_identity.stdout_lines[0] | default('unknown') }}"
-        current_user: "{{ current_identity.stdout_lines[1] | default('unknown') }}"
+        current_uid: "{{ current_identity.stdout_lines[0] }}"
+        current_user: "{{ current_identity.stdout_lines[1] }}"
 
     - name: Crea directory per report
       ansible.builtin.file:
@@ -77,7 +76,7 @@
         msg: >-
           Avviso: il playbook è in esecuzione come {{ current_user }} (UID: {{ current_uid }}).
           Alcune verifiche amministrative e tutte le modifiche di sistema verranno saltate.
-          Per esecuzione completa usare: sudo ansible-playbook -b check.yml
+          Abilitare l'escalation dei privilegi (become/sudo) nel template o nelle credenziali di Semaphore.
       when: current_uid != "0"
 
     - name: Conferma esecuzione con root
