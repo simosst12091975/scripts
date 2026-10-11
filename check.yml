@@ -60,7 +60,7 @@
       register: python_bootstrap
       changed_when: "'INSTALL_RESULT=installed' in python_bootstrap.stdout"
 
-- name: Verifica Strict Mode - Server Production Ready (Bare Metal & VM)
+- name: "Verifica Strict Mode - Server Production Ready (Bare Metal & VM)"
   hosts: laboratorio_ai
   gather_facts: true
   become: true
@@ -105,7 +105,7 @@
         insertafter: EOF
 
     # ========== VERIFICA SISTEMA OPERATIVO ==========
-    - name: Verifica che il sistema sia Ubuntu 24.04 o 26.04 (STRICT)
+    - name: "Verifica che il sistema sia Ubuntu 24.04 o 26.04 (STRICT)"
       ansible.builtin.assert:
         that:
           - ansible_facts.distribution == "Ubuntu"
@@ -219,7 +219,7 @@
         path: /etc/ssh/sshd_config
       register: sshd_config
 
-    - name: Verifica permessi sshd_config (strict: 0600)
+    - name: "Verifica permessi sshd_config (strict: 0600)"
       ansible.builtin.assert:
         that:
           - sshd_config.stat.exists
@@ -233,7 +233,7 @@
         success_msg: >-
           ✓ Permessi sshd_config corretti: {{ sshd_config.stat.mode }} root:root
 
-    - name: Verifica configurazione SSH (hardening basics)
+    - name: "Verifica configurazione SSH (hardening basics)"
       ansible.builtin.lineinfile:
         path: /etc/ssh/sshd_config
         regexp: "{{ item.regexp }}"
@@ -462,9 +462,9 @@
     - name: Mostra riepilogo finale in console
       ansible.builtin.debug:
         msg:
-          - "════════════════════════════════════════════════════════════════════════════════"
+          - "================================================================================"
           - "                       HEALTH CHECK REPORT - STRICT MODE"
-          - "════════════════════════════════════════════════════════════════════════════════"
+          - "================================================================================"
           - ""
           - "SISTEMA:"
           - "  Host: {{ health_check_summary.host }} ({{ health_check_summary.fqdn }})"
@@ -492,9 +492,9 @@
           - "TIME: {{ health_check_summary.timestamp }}"
           - "LOG: {{ log_file }}"
           - ""
-          - "════════════════════════════════════════════════════════════════════════════════"
+          - "================================================================================"
           - "                    ✓ SISTEMA PRONTO PER PRODUCTION"
-          - "════════════════════════════════════════════════════════════════════════════════"
+          - "================================================================================"
 
     - name: Log - Check completato con successo
       ansible.builtin.lineinfile:
