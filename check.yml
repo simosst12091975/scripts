@@ -54,15 +54,20 @@
     report_dir: "/tmp/ansible-checks"
 
   pre_tasks:
-    - name: Determina UID e utente corrente
-      ansible.builtin.command: id -u && whoami
-      register: current_identity
+    - name: Determina UID corrente
+      ansible.builtin.command: id -u
+      register: current_uid_result
+      changed_when: false
+
+    - name: Determina utente corrente
+      ansible.builtin.command: whoami
+      register: current_user_result
       changed_when: false
 
     - name: Imposta variabili di contesto
       ansible.builtin.set_fact:
-        current_uid: "{{ current_identity.stdout_lines[0] }}"
-        current_user: "{{ current_identity.stdout_lines[1] }}"
+        current_uid: "{{ current_uid_result.stdout }}"
+        current_user: "{{ current_user_result.stdout }}"
 
     - name: Crea directory per report
       ansible.builtin.file:
