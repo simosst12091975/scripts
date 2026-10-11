@@ -1,4 +1,46 @@
 ---
+- name: Prepara Python per Ansible su Ubuntu
+  hosts: laboratorio_ai
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Verifica Ubuntu 24/26 e installa Python 3 se manca
+      ansible.builtin.raw: |
+        if [ ! -r /etc/os-release ]; then
+          echo "Impossibile identificare il sistema: manca /etc/os-release." >&2
+          exit 1
+        fi
+        . /etc/os-release
+        if [ "$ID" != "ubuntu" ]; then
+          echo "Sistema non supportato: atteso Ubuntu 24 o 26, rilevato $ID ${VERSION_ID:-sconosciuto}." >&2
+          exit 1
+        fi
+        case "${VERSION_ID:-}" in
+          24.*|26.*) ;;
+          *)
+            echo "Versione Ubuntu non supportata: ${VERSION_ID:-sconosciuta}. Attese 24 o 26." >&2
+            exit 1
+            ;;
+        esac
+        if command -v python3 >/dev/null 2>&1; then
+          echo "INSTALL_RESULT=present"
+        else
+          if ! command -v apt-get >/dev/null 2>&1; then
+            echo "apt-get non disponibile: impossibile installare python3." >&2
+            exit 1
+          fi
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update && apt-get install -y python3 || exit 1
+          command -v python3 >/dev/null 2>&1 || {
+            echo "Installazione completata ma python3 non è disponibile." >&2
+            exit 1
+          }
+          echo "INSTALL_RESULT=installed"
+        fi
+      register: python_bootstrap
+      changed_when: "'INSTALL_RESULT=installed' in python_bootstrap.stdout"
+
 - name: Verifica server Ubuntu
   hosts: laboratorio_ai
   gather_facts: true
