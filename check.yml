@@ -46,6 +46,7 @@
   become: false
   serial: 1
   vars:
+    ansible_python_interpreter: /usr/bin/python3
     environment_type: "{{ 'vm' if ansible_facts.virtualization_role == 'guest' else 'bare_metal' }}"
     min_disk_space_gb: 10
     min_memory_mb: 2048
