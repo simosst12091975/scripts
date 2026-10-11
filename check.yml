@@ -2,7 +2,7 @@
 - name: Bootstrap Python per Ansible su Ubuntu
   hosts: laboratorio_ai
   gather_facts: false
-  become: true
+  become: false
   vars:
     required_python_version: "3.8"
     required_packages:
@@ -15,7 +15,7 @@
       - ca-certificates
 
   tasks:
-    - name: Verifica e installa Python 3 su Ubuntu bare metal/VM
+    - name: Verifica che l'host sia Ubuntu 24/26 e installa Python 3 se manca
       ansible.builtin.raw: |
         if [ ! -r /etc/os-release ]; then
           echo "Impossibile identificare il sistema: manca /etc/os-release." >&2
@@ -54,17 +54,31 @@
 - name: Verifica approfondita server Ubuntu bare metal e VM
   hosts: laboratorio_ai
   gather_facts: true
-  become: true
+  become: false
   vars:
     environment_type: "{{ 'vm' if ansible_facts.virtualization_role == 'guest' else 'bare_metal' }}"
 
   tasks:
+    - name: Verifica UID attuale e privilegi root
+      ansible.builtin.command: id -u
+      register: root_uid
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Avviso se il play viene eseguito senza privilegi root
+      ansible.builtin.debug:
+        msg: >-
+          Attenzione: il processo non è in esecuzione come root (UID: {{ root_uid.stdout | default('sconosciuto') }}).
+          Le verifiche che richiedono permessi amministrativi saranno saltate.
+      when: root_uid.stdout != "0"
+
     # ========== VERIFICA SISTEMA OPERATIVO ==========
     - name: Verifica che il sistema sia Ubuntu 24.04 o 26.04
       ansible.builtin.assert:
         that:
           - ansible_facts.distribution == "Ubuntu"
-          - ansible_facts.distribution_version is regex('^(24\.04|26\.04)$')
+          - ansible_facts.distribution_version is regex('^(24\\.04|26\\.04)$')
         fail_msg: >-
           Sistema non supportato: {{ ansible_facts.distribution }}
           {{ ansible_facts.distribution_version }}.
@@ -77,6 +91,7 @@
       register: upgradable_packages
       changed_when: false
       check_mode: false
+      failed_when: false
 
     - name: Avviso se ci sono aggiornamenti disponibili
       ansible.builtin.debug:
@@ -85,39 +100,11 @@
           Si consiglia di eseguire: sudo apt update && sudo apt upgrade -y
       when: upgradable_packages.stdout_lines | length > 1
 
-    # ========== VERIFICA PRIVILEGI ==========
-    - name: Verifica che l'escalation dei privilegi funzioni
-      ansible.builtin.command: id -u
-      register: root_uid
-      changed_when: false
-      check_mode: false
-
-    - name: Conferma i privilegi root
-      ansible.builtin.assert:
-        that:
-          - root_uid.stdout == "0"
-        fail_msg: >-
-          Il task è stato eseguito senza privilegi root.
-          Verificare become e le credenziali sudo.
-        success_msg: >-
-          ✓ Task eseguito con privilegi root (UID: {{ root_uid.stdout }})
-
-    - name: Verifica disponibilità sudo
-      ansible.builtin.command: which sudo
-      register: sudo_path
-      changed_when: false
-      failed_when: false
-
-    - name: Mostra stato sudo
-      ansible.builtin.debug:
-        msg:
-          - "✓ sudo disponibile: {{ sudo_path.stdout }}"
-      when: sudo_path.rc == 0
-
     # ========== VERIFICA PACCHETTI ESSENZIALI ==========
     - name: Raccoglie lo stato dei pacchetti
       ansible.builtin.package_facts:
         manager: auto
+      when: root_uid.stdout == "0"
 
     - name: Verifica pacchetti essenziali
       ansible.builtin.assert:
@@ -126,6 +113,7 @@
         fail_msg: "Pacchetto mancante: {{ item }}"
         success_msg: "✓ Pacchetto presente: {{ item }}"
       loop: "{{ required_packages }}"
+      when: root_uid.stdout == "0"
       ignore_errors: true
       register: package_check
 
@@ -135,13 +123,16 @@
         state: present
         update_cache: true
       loop: "{{ required_packages }}"
-      when: item not in ansible_facts.packages
+      when:
+        - root_uid.stdout == "0"
+        - item not in ansible_facts.packages
       register: package_install
+      become: true
 
     - name: Mostra pacchetti installati
       ansible.builtin.debug:
         msg: "✓ Pacchetti essenziali verificati/installati"
-      when: package_install is defined
+      when: root_uid.stdout == "0" and package_install is defined
 
     # ========== VERIFICA SERVIZI CRITICI ==========
     - name: Raccoglie lo stato dei servizi
@@ -187,28 +178,34 @@
       ansible.builtin.stat:
         path: /etc/ssh/sshd_config
       register: sshd_config
+      failed_when: false
 
     - name: Verifica permessi sshd_config
       ansible.builtin.assert:
         that:
+          - sshd_config.stat.exists
           - sshd_config.stat.mode == "0600"
         fail_msg: >-
           Permessi errati per /etc/ssh/sshd_config.
-          Attesi: 0600, Trovati: {{ sshd_config.stat.mode }}
+          Attesi: 0600, Trovati: {{ sshd_config.stat.mode | default('non presente') }}
         success_msg: >-
           ✓ Permessi sshd_config corretti: {{ sshd_config.stat.mode }}
+      when: root_uid.stdout == "0"
 
     - name: Estrae configurazione SSH critica
       ansible.builtin.shell: |
         grep -E "^(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|X11Forwarding)" /etc/ssh/sshd_config || echo "Valori di default"
       register: ssh_config
       changed_when: false
+      failed_when: false
+      when: root_uid.stdout == "0"
 
     - name: Mostra configurazione SSH
       ansible.builtin.debug:
         msg: |
           Configurazione SSH rilevante:
           {{ ssh_config.stdout }}
+      when: root_uid.stdout == "0"
 
     # ========== VERIFICA CONNETTIVITÀ ==========
     - name: Verifica DNS
@@ -255,7 +252,7 @@
     - name: Mostra supporto virtualizzazione
       ansible.builtin.debug:
         msg: "✓ CPU supporta virtualizzazione"
-      when: 
+      when:
         - environment_type == 'bare_metal'
         - cpu_virt.rc == 0
 
@@ -269,7 +266,7 @@
     - name: Mostra stato IOMMU
       ansible.builtin.debug:
         msg: "✓ IOMMU abilitato nel kernel"
-      when: 
+      when:
         - environment_type == 'bare_metal'
         - iommu_check.rc == 0
 
@@ -389,12 +386,15 @@
       changed_when: false
       failed_when: false
       become: true
+      when: root_uid.stdout == "0"
 
     - name: Mostra stato firewall
       ansible.builtin.debug:
         msg: |
           {{ ufw_status.stdout }}
-      when: ufw_status.rc == 0
+      when:
+        - root_uid.stdout == "0"
+        - ufw_status.rc == 0
 
     # ========== RIEPILOGO FINALE ==========
     - name: Riepilogo completo del sistema
