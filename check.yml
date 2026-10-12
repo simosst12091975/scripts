@@ -1,473 +1,596 @@
 ---
-- name: Bootstrap Python per Ansible su Ubuntu
-  hosts: all
-  gather_facts: false
-  become: false
-  vars:
-    required_packages:
-      - python3
-      - python3-apt
-      - openssh-server
-      - openssh-client
-      - curl
-      - wget
-      - ca-certificates
-  tasks:
-    - name: Verifica sistema operativo e Python 3
-      ansible.builtin.raw: |
-        if [ ! -r /etc/os-release ]; then
-          echo "Impossibile identificare il sistema: manca /etc/os-release." >&2
-          exit 1
-        fi
-        . /etc/os-release
-        if [ "$ID" != "ubuntu" ]; then
-          echo "Sistema non supportato: atteso Ubuntu, rilevato $ID ${VERSION_ID:-sconosciuto}." >&2
-          exit 1
-        fi
-        case "${VERSION_ID:-}" in
-          24.*|26.*) ;;
-          *)
-            echo "Versione Ubuntu non supportata: ${VERSION_ID:-sconosciuta}. Attese 24 o 26." >&2
-            exit 1
-            ;;
-        esac
-        if command -v python3 >/dev/null 2>&1; then
-          echo "INSTALL_RESULT=present"
-        else
-          echo "Python3 non trovato. Eseguire il playbook come root o installare manualmente python3."
-          exit 1
-        fi
-      register: python_bootstrap
-      changed_when: "'INSTALL_RESULT=installed' in python_bootstrap.stdout"
-
-- name: "Verifica server Ubuntu - Flexible Mode (Tutti gli Host)"
+- name: Verifica salute Linux, FreeBSD e OPNsense (sola lettura)
   hosts: all
   gather_facts: true
   become: false
   serial: 1
   vars:
-    ansible_python_interpreter: /usr/bin/python3
-    environment_type: "{{ 'vm' if ansible_facts.virtualization_role == 'guest' else 'bare_metal' }}"
+    ansible_python_interpreter: auto_silent
     min_disk_space_gb: 10
     min_memory_mb: 2048
     min_cpu_cores: 2
-    report_dir: "/tmp/ansible-checks"
+    ssh_port: 22
+    healthcheck_dns_name: example.com
+    healthcheck_url: https://example.com/
+    package_requirements:
+      Debian:
+        - python3
+        - openssh-server
+        - openssh-client
+        - curl
+        - wget
+        - ca-certificates
+      RedHat:
+        - python3
+        - openssh-server
+        - openssh-clients
+        - curl
+        - wget
+        - ca-certificates
+    container_virtualization_types:
+      - container
+      - containerd
+      - docker
+      - freebsd_jail
+      - jail
+      - lxc
+      - lxc-libvirt
+      - openvz
+      - podman
+      - systemd-nspawn
 
   pre_tasks:
-    - name: Determina UID corrente
-      ansible.builtin.command: id -u
-      register: current_uid_result
-      changed_when: false
-
-    - name: Determina utente corrente
-      ansible.builtin.command: whoami
-      register: current_user_result
-      changed_when: false
-
-    - name: Imposta variabili di contesto
-      ansible.builtin.set_fact:
-        current_uid: "{{ current_uid_result.stdout }}"
-        current_user: "{{ current_user_result.stdout }}"
-
-    - name: Crea directory per report
-      ansible.builtin.file:
-        path: "{{ report_dir }}"
-        state: directory
-        mode: "0755"
-      failed_when: false
-
-    - name: Avviso se eseguito senza root
-      ansible.builtin.debug:
-        msg: >-
-          Avviso: il playbook è in esecuzione come {{ current_user }} (UID: {{ current_uid }}).
-          La raccolta facts non richiede root. I task amministrativi usano become esplicitamente
-          e richiedono l'escalation configurata nel template o nelle credenziali di Semaphore.
-      when: current_uid != "0"
-
-    - name: Conferma esecuzione con root
-      ansible.builtin.debug:
-        msg: "Esecuzione con privilegi root (UID: 0) - tutte le verifiche saranno eseguite."
-      when: current_uid == "0"
-
-  tasks:
-    - name: Verifica che il sistema sia Ubuntu 24.04 o 26.04
+    - name: Verifica le famiglie di sistemi supportate
       ansible.builtin.assert:
         that:
-          - ansible_facts.distribution == "Ubuntu"
-          - ansible_facts.distribution_version is regex('^(24\\.04|26\\.04)$')
+          - ansible_facts.os_family in ['Debian', 'RedHat', 'FreeBSD']
+          - >-
+            ansible_facts.os_family == 'FreeBSD'
+            or ansible_facts.pkg_mgr | default('') in ['apt', 'dnf', 'yum']
         fail_msg: >-
-          Sistema non supportato: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}.
-          Questo playbook verifica Ubuntu 24.04 e 26.04.
-        success_msg: >-
-          Sistema supportato: Ubuntu {{ ansible_facts.distribution_version }}.
+          Sistema non supportato:
+          {{ ansible_facts.distribution | default('sconosciuto') }}
+          (famiglia {{ ansible_facts.os_family | default('sconosciuta') }}).
+          Supportati Linux Debian/apt, RedHat/dnf o yum, FreeBSD e OPNsense.
 
-    - name: Aggiorna i pacchetti senza cambiare la release di Ubuntu
-      ansible.builtin.apt:
-        update_cache: true
-        cache_valid_time: 3600
-        upgrade: safe
-      register: system_update
-      become: true
-      become_user: root
-      ignore_unreachable: true
-
-    - name: Chiude la connessione SSH persistente dopo gli aggiornamenti
-      ansible.builtin.meta: reset_connection
-
-    - name: Attende che il server sia nuovamente raggiungibile via SSH
-      ansible.builtin.wait_for_connection:
-        delay: 5
-        connect_timeout: 10
-        sleep: 10
-        timeout: 600
-
-    - name: Verifica che la release Ubuntu sia rimasta invariata
+    - name: Determina l'utente e i privilegi della connessione
       ansible.builtin.command:
         argv:
-          - bash
+          - sh
           - -c
-          - '. /etc/os-release && printf "%s %s" "$ID" "$VERSION_ID"'
-      register: release_after_update
+          - 'printf "%s\n%s" "$(id -u)" "$(id -un)"'
+      register: connection_identity
       changed_when: false
 
-    - name: Conferma che l'aggiornamento non abbia cambiato release
-      ansible.builtin.assert:
-        that:
-          - release_after_update.stdout == "ubuntu " ~ ansible_facts.distribution_version
-        fail_msg: >-
-          La release del sistema è cambiata inaspettatamente:
-          {{ release_after_update.stdout }}.
-          Release iniziale: Ubuntu {{ ansible_facts.distribution_version }}.
-        success_msg: >-
-          Release invariata: Ubuntu {{ ansible_facts.distribution_version }}.
-
-    - name: Mostra il risultato degli aggiornamenti
-      ansible.builtin.debug:
-        msg: >-
-          {{ 'Pacchetti aggiornati.' if system_update.changed else
-          'Sistema già aggiornato: nessun pacchetto da aggiornare.' }}
-
-    - name: Verifica aggiornamenti kernel
+    - name: Rileva il kernel effettivo
       ansible.builtin.command:
         argv:
-          - apt
-          - list
-          - --upgradable
-      register: kernel_updates
+          - uname
+          - -s
+      register: detected_kernel
+      changed_when: false
+
+    - name: Rileva il comando versione OPNsense su FreeBSD
+      ansible.builtin.command:
+        argv:
+          - opnsense-version
+      register: opnsense_version
       changed_when: false
       failed_when: false
+      when: ansible_facts.os_family == 'FreeBSD'
 
-    - name: Avviso aggiornamenti kernel disponibili
-      ansible.builtin.debug:
-        msg: >-
-          Restano aggiornamenti kernel dopo l'aggiornamento dei pacchetti.
-          Potrebbe essere necessario riavviare il server per applicarli.
-      when: "'linux-image' in kernel_updates.stdout"
+    - name: Classifica il sistema e rileva le risorse
+      ansible.builtin.set_fact:
+        current_uid: "{{ connection_identity.stdout_lines[0] }}"
+        current_user: "{{ connection_identity.stdout_lines[1] }}"
+        is_freebsd_like: "{{ ansible_facts.os_family == 'FreeBSD' }}"
+        is_opnsense: >-
+          {{
+            ansible_facts.distribution | lower == 'opnsense'
+            or (
+              ansible_facts.os_family == 'FreeBSD'
+              and opnsense_version.rc | default(1) == 0
+            )
+          }}
+        environment_type: >-
+          {{
+            'container'
+            if (ansible_facts.virtualization_type | default('unknown') | lower)
+               in container_virtualization_types
+            else (
+              'virtual_machine'
+              if (
+                ansible_facts.virtualization_role | default('host') == 'guest'
+                or (
+                  ansible_facts.virtualization_type
+                  | default('unknown') | lower
+                ) not in ['', 'unknown', 'na', 'none', 'physical']
+              )
+              else 'bare_metal'
+            )
+          }}
+        root_mounts: >-
+          {{
+            ansible_facts.mounts | default([])
+            | selectattr('mount', 'equalto', '/') | list
+          }}
+        cpu_cores: >-
+          {{
+            ansible_facts.processor_vcpus
+            | default(ansible_facts.processor_count | default(0)) | int
+          }}
 
-    - name: Raccoglie i pacchetti installati
+    - name: Calcola controlli risorse e requisiti pacchetti
+      ansible.builtin.set_fact:
+        root_mount: "{{ root_mounts | first | default({}) }}"
+        required_packages: >-
+          {{
+            package_requirements.get(ansible_facts.os_family, [])
+            | reject(
+                'in',
+                ['openssh-server', 'openssh-client', 'openssh-clients']
+              )
+            | list
+            if environment_type == 'container'
+            else package_requirements.get(ansible_facts.os_family, [])
+          }}
+        package_check_applicable: >-
+          {{ ansible_facts.os_family in ['Debian', 'RedHat'] }}
+        memory_ok: >-
+          {{
+            (ansible_facts.memtotal_mb | default(0) | int)
+            >= (min_memory_mb | int)
+          }}
+        cpu_ok: "{{ (cpu_cores | int) >= (min_cpu_cores | int) }}"
+        disk_ok: >-
+          {{
+            (root_mounts | first | default({})).get('size_available', 0) | int
+            >= ((min_disk_space_gb | int) * 1073741824)
+          }}
+
+    - name: Verifica che OPNsense sia rilevato come sistema FreeBSD-like
+      ansible.builtin.assert:
+        that:
+          - not (is_opnsense | bool) or is_freebsd_like | bool
+          - >-
+            not (is_opnsense | bool)
+            or detected_kernel.stdout | lower == 'freebsd'
+        fail_msg: >-
+          OPNsense è stato identificato ma i facts non riportano un kernel
+          FreeBSD. Rilevati: famiglia {{ ansible_facts.os_family }},
+          kernel {{ detected_kernel.stdout | default('sconosciuto') }}.
+        success_msg: >-
+          OPNsense rilevato su kernel FreeBSD
+          ({{
+            opnsense_version.stdout
+            | default('versione non rilevata') | trim
+          }}).
+      when: is_opnsense | bool
+
+    - name: Raccoglie i pacchetti installati sui sistemi Linux
       ansible.builtin.package_facts:
         manager: auto
-      register: package_facts
+      register: installed_package_facts
       failed_when: false
+      when: ansible_facts.os_family in ['Debian', 'RedHat']
 
-    - name: Verifica pacchetti essenziali
-      ansible.builtin.assert:
-        that:
-          - item in ansible_facts.packages
-        fail_msg: "Pacchetto non presente: {{ item }}"
-        success_msg: "Pacchetto presente: {{ item }}"
-      loop: "{{ required_packages }}"
-      when: package_facts is defined and package_facts.succeeded | default(false)
-      ignore_errors: true
-      register: package_check
-
-    - name: Installazione pacchetti essenziali (solo root)
-      ansible.builtin.apt:
-        name: "{{ item }}"
-        state: present
-        update_cache: true
-      loop: "{{ required_packages }}"
-      when:
-        - current_uid == "0"
-        - package_facts is defined
-        - item not in ansible_facts.packages
-      register: package_install
-      ignore_errors: true
-      become: true
-
-    - name: Conferma installazione pacchetti
-      ansible.builtin.debug:
-        msg: "Pacchetti essenziali verificati/installati"
-      when: current_uid == "0" and package_install is defined
-
-    - name: Raccoglie lo stato dei servizi
+    - name: Raccoglie i servizi sui sistemi Linux
       ansible.builtin.service_facts:
-      register: service_facts
+      register: detected_service_facts
       failed_when: false
+      when: ansible_facts.os_family in ['Debian', 'RedHat']
 
-    - name: Verifica che il servizio SSH sia presente e attivo
-      ansible.builtin.assert:
-        that:
-          - "'ssh.service' in ansible_facts.services or 'ssh' in ansible_facts.services"
-          - ansible_facts.services['ssh.service' if 'ssh.service' in ansible_facts.services else 'ssh'].state == "running"
-        fail_msg: >-
-          SSH non è in esecuzione o non è stato rilevato.
-        success_msg: >-
-          SSH è in esecuzione.
-      when: service_facts is defined and service_facts.succeeded | default(false)
-      ignore_errors: true
+    - name: Determina il nome del servizio SSH
+      ansible.builtin.set_fact:
+        ssh_service_name: >-
+          {{
+            'sshd' if is_freebsd_like | bool
+            else 'ssh.service'
+            if 'ssh.service' in (ansible_facts.services | default({}))
+            else 'ssh' if 'ssh' in (ansible_facts.services | default({}))
+            else 'sshd.service'
+            if 'sshd.service' in (ansible_facts.services | default({}))
+            else 'sshd' if 'sshd' in (ansible_facts.services | default({}))
+            else ''
+          }}
+        package_facts_available: >-
+          {{
+            not (package_check_applicable | bool)
+            or not (installed_package_facts.failed | default(false))
+          }}
+        missing_required_packages: >-
+          {{
+            required_packages
+            | reject('in', ansible_facts.packages | default({}))
+            | list
+          }}
 
-    - name: Verifica porta SSH in ascolto
-      ansible.builtin.command: ss -tlnp 2>/dev/null | grep ":22 " || echo "ssh_check_skipped"
+  tasks:
+    - name: Mostra identità e piattaforma
+      ansible.builtin.debug:
+        msg:
+          - >-
+            Host: {{ inventory_hostname }}
+            ({{ ansible_facts.hostname | default('N/D') }})
+          - >-
+            Sistema: {{ ansible_facts.distribution | default('N/D') }}
+            {{ ansible_facts.distribution_version | default('') }}
+          - >-
+            Kernel/famiglia: {{ ansible_facts.kernel | default('N/D') }}
+            / {{ ansible_facts.os_family }}
+          - >-
+            Piattaforma:
+            {{
+              'OPNsense basato su FreeBSD'
+              if is_opnsense | bool
+              else 'FreeBSD'
+              if is_freebsd_like | bool
+              else 'Linux'
+            }}
+          - >-
+            Package manager:
+            {{ ansible_facts.pkg_mgr | default('pkg (FreeBSD)') }}
+          - >-
+            Ambiente: {{ environment_type }} —
+            {{ ansible_facts.virtualization_type | default('non rilevato') }}
+          - "Connessione: {{ current_user }} (UID {{ current_uid }})"
+
+    - name: Riporta il controllo RAM
+      ansible.builtin.debug:
+        msg: >-
+          RAM: {{ ansible_facts.memtotal_mb | default(0) }} MB;
+          minimo: {{ min_memory_mb }} MB;
+          esito: {{ 'OK' if memory_ok | bool else 'ATTENZIONE' }}.
+
+    - name: Riporta il controllo CPU
+      ansible.builtin.debug:
+        msg: >-
+          CPU/vCPU: {{ cpu_cores }};
+          minimo: {{ min_cpu_cores }};
+          esito: {{ 'OK' if cpu_ok | bool else 'ATTENZIONE' }}.
+
+    - name: Riporta lo spazio libero sulla root
+      ansible.builtin.debug:
+        msg: >-
+          Spazio root libero:
+          {{
+            ((root_mount.get('size_available', 0) | int) / 1073741824)
+            | round(1)
+          }} GB;
+          minimo: {{ min_disk_space_gb }} GB;
+          esito: {{ 'OK' if disk_ok | bool else 'ATTENZIONE' }}.
+
+    - name: Riporta il controllo pacchetti Linux
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'Controllo pacchetti non applicabile su FreeBSD/OPNsense.'
+            if not package_check_applicable | bool
+            else (
+              'Pacchetti mancanti: ' ~ (missing_required_packages | join(', '))
+              if package_facts_available | bool
+                 and missing_required_packages | length > 0
+              else (
+                'Pacchetti richiesti presenti.'
+                if package_facts_available | bool
+                else 'Verifica pacchetti non disponibile.'
+              )
+            )
+          }}
+
+    - name: Riporta lo stato del servizio SSH Linux
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'Servizio SSH (' ~ ssh_service_name ~ '): '
+            ~ (ansible_facts.services | default({}))[ssh_service_name].state
+            if ssh_service_name | length > 0
+            else 'Servizio SSH non rilevato.'
+          }}
+      when: not is_freebsd_like | bool
+
+    - name: Verifica lo stato di sshd su FreeBSD e OPNsense
+      ansible.builtin.command:
+        argv:
+          - service
+          - sshd
+          - onestatus
+      register: freebsd_ssh_status
+      changed_when: false
+      failed_when: false
+      when: is_freebsd_like | bool
+
+    - name: Riporta lo stato di sshd su FreeBSD e OPNsense
+      ansible.builtin.debug:
+        msg: >-
+          Servizio sshd:
+          {{
+            'attivo'
+            if freebsd_ssh_status.rc == 0
+            else 'non attivo o stato non rilevabile'
+          }}.
+      when: is_freebsd_like | bool
+
+    - name: Verifica la porta SSH in ascolto
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['sockstat', '-46', '-l', '-P', 'tcp', '-p', ssh_port | string]
+            if is_freebsd_like | bool
+            else ['ss', '-H', '-ltn', 'sport', '=', ':' ~ (ssh_port | string)]
+          }}
       register: ssh_listen
       changed_when: false
       failed_when: false
 
-    - name: Conferma SSH in ascolto
+    - name: Riporta il controllo della porta SSH
       ansible.builtin.debug:
-        msg: "SSH in ascolto sulla porta 22"
-      when: ssh_listen.rc == 0 and ssh_listen.stdout != "ssh_check_skipped"
+        msg: >-
+          {{
+            'Listener rilevati: ' ~ (ssh_listen.stdout | trim)
+            if ssh_listen.rc == 0 and ssh_listen.stdout | trim | length > 0
+            else 'Nessun listener o strumento di controllo non disponibile.'
+          }}
 
-    - name: Verifica file SSH config e permessi (solo root)
+    - name: Verifica la presenza della configurazione SSH
       ansible.builtin.stat:
         path: /etc/ssh/sshd_config
       register: sshd_config
-      when: current_uid == "0"
 
-    - name: Controllo hardening SSH - Permessi (solo root)
-      ansible.builtin.assert:
-        that:
-          - sshd_config.stat.exists
-          - sshd_config.stat.mode == "0600"
-        fail_msg: >-
-          Permessi non corretti per /etc/ssh/sshd_config.
-        success_msg: >-
-          Permessi sshd_config corretti.
-      when:
-        - current_uid == "0"
-        - sshd_config is defined
-      ignore_errors: true
-
-    - name: "Applica hardening SSH - Configurazione (solo root)"
-      ansible.builtin.lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-        state: present
-        validate: '/usr/sbin/sshd -t -f %s'
-      loop:
-        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin prohibit-password' }
-        - { regexp: '^#?PubkeyAuthentication', line: 'PubkeyAuthentication yes' }
-        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
-        - { regexp: '^#?X11Forwarding', line: 'X11Forwarding no' }
-        - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries 3' }
-        - { regexp: '^#?ClientAliveInterval', line: 'ClientAliveInterval 300' }
-        - { regexp: '^#?ClientAliveCountMax', line: 'ClientAliveCountMax 2' }
-      when: current_uid == "0"
-      register: ssh_hardening
-      ignore_errors: true
-      become: true
-      notify: Restart SSH
-
-    - name: Conferma hardening SSH applicato
+    - name: Riporta la configurazione SSH
       ansible.builtin.debug:
-        msg: "SSH hardening applicato"
-      when: current_uid == "0" and ssh_hardening is defined
+        msg: >-
+          {{
+            'sshd_config presente, permessi '
+            ~ (sshd_config.stat.mode | default('non rilevati')) ~ '.'
+            if sshd_config.stat.exists
+            else 'File /etc/ssh/sshd_config non presente.'
+          }}
 
-    - name: Verifica firewall UFW (solo root)
-      ansible.builtin.command: ufw status
+    - name: Verifica UFW sui sistemi Linux
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - status
       register: ufw_status
       changed_when: false
       failed_when: false
-      when: current_uid == "0"
-      become: true
+      when: ansible_facts.os_family in ['Debian', 'RedHat']
 
-    - name: "Configura firewall - Abilita UFW (solo root)"
-      ansible.builtin.command: ufw --force enable
-      register: ufw_enable
-      when:
-        - current_uid == "0"
-        - "'Status: inactive' in ufw_status.stdout"
-      ignore_errors: true
-      become: true
+    - name: Verifica firewalld sui sistemi Linux
+      ansible.builtin.command:
+        argv:
+          - firewall-cmd
+          - --state
+      register: firewalld_status
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family in ['Debian', 'RedHat']
 
-    - name: "Configura firewall - Consenti SSH (solo root)"
-      ansible.builtin.command: ufw allow 22/tcp
-      register: ufw_ssh
-      when: current_uid == "0"
-      ignore_errors: true
-      become: true
+    - name: Verifica PF su FreeBSD e OPNsense
+      ansible.builtin.command:
+        argv:
+          - pfctl
+          - -s
+          - info
+      register: pf_status
+      changed_when: false
+      failed_when: false
+      when: is_freebsd_like | bool
 
-    - name: Avviso firewall se non-root
+    - name: Riporta gli stati dei firewall
       ansible.builtin.debug:
-        msg: "Verifica firewall saltata: il playbook non è in esecuzione come root."
-      when: current_uid != "0"
+        msg:
+          - >-
+            UFW: {{
+              ufw_status.stdout | trim
+              if ansible_facts.os_family in ['Debian', 'RedHat']
+                 and ufw_status.rc == 0
+              else (
+                'non disponibile'
+                if ansible_facts.os_family in ['Debian', 'RedHat']
+                else 'non applicabile'
+              )
+            }}
+          - >-
+            firewalld: {{
+              firewalld_status.stdout | trim
+              if ansible_facts.os_family in ['Debian', 'RedHat']
+                 and firewalld_status.rc == 0
+              else (
+                'non disponibile'
+                if ansible_facts.os_family in ['Debian', 'RedHat']
+                else 'non applicabile'
+              )
+            }}
+          - >-
+            PF: {{
+              pf_status.stdout | trim
+              if is_freebsd_like | bool and pf_status.rc == 0
+              else (
+                'non disponibile'
+                if is_freebsd_like | bool
+                else 'non applicabile'
+              )
+            }}
 
-    - name: Conferma firewall configurato
-      ansible.builtin.debug:
-        msg: "Firewall configurato"
-      when: current_uid == "0" and ufw_status.rc == 0
-
-    - name: Verifica memoria RAM (minimo richiesto)
-      ansible.builtin.assert:
-        that:
-          - (ansible_facts.memtotal_mb | int) >= min_memory_mb
-        fail_msg: >-
-          Memoria insufficiente: {{ ansible_facts.memtotal_mb }} MB. Minimo richiesto: {{ min_memory_mb }} MB.
-        success_msg: >-
-          Memoria RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB.
-
-    - name: Verifica numero CPU (minimo richiesto)
-      ansible.builtin.assert:
-        that:
-          - (ansible_facts.processor_vcpus | int) >= min_cpu_cores
-        fail_msg: >-
-          CPU insufficiente: {{ ansible_facts.processor_vcpus }}. Minimo richiesto: {{ min_cpu_cores }} vCPU.
-        success_msg: >-
-          CPU: {{ ansible_facts.processor_vcpus }} vCPU.
-
-    - name: Verifica spazio disco root (minimo richiesto)
-      ansible.builtin.assert:
-        that:
-          - (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | int >= min_disk_space_gb
-        fail_msg: >-
-          Spazio disco insufficiente in root: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB disponibili. Minimo richiesto: {{ min_disk_space_gb }} GB.
-        success_msg: >-
-          Spazio disco disponibile: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB.
-
-    - name: Verifica DNS
-      ansible.builtin.command: getent hosts google.com
+    - name: Verifica la risoluzione DNS
+      ansible.builtin.command:
+        argv:
+          - getent
+          - hosts
+          - "{{ healthcheck_dns_name }}"
       register: dns_check
       changed_when: false
       failed_when: false
 
-    - name: Conferma DNS funzionante
+    - name: Riporta il controllo DNS
       ansible.builtin.debug:
-        msg: "DNS: OK"
-      when: dns_check.rc == 0
+        msg: >-
+          DNS {{ healthcheck_dns_name }}:
+          {{ 'OK' if dns_check.rc == 0 else 'non risolto o non disponibile' }}.
 
-    - name: Verifica connettività esterna
+    - name: Verifica la connettività HTTPS
       ansible.builtin.uri:
-        url: "https://www.google.com"
+        url: "{{ healthcheck_url }}"
         method: HEAD
-        status_code: [200, 301, 302]
-        timeout: 5
+        status_code: [200, 301, 302, 403, 405]
+        timeout: 10
       register: external_connectivity
       changed_when: false
       failed_when: false
-      ignore_errors: true
 
-    - name: Conferma connettività esterna
-      ansible.builtin.debug:
-        msg: "Connettività esterna: OK"
-      when: external_connectivity.status is defined and external_connectivity.status in [200, 301, 302]
-
-    - name: Visualizza tipo ambiente
+    - name: Riporta il controllo HTTPS
       ansible.builtin.debug:
         msg: >-
-          Ambiente: {{ environment_type | upper }}
-          Virtualizzazione: {{ ansible_facts.virtualization_type | default('N/A') }}
-          Role: {{ ansible_facts.virtualization_role | default('host') }}
+          HTTPS {{ healthcheck_url }}:
+          {{
+            'OK (HTTP ' ~ (external_connectivity.status | string) ~ ')'
+            if external_connectivity.status is defined
+            else 'non disponibile: '
+              ~ (external_connectivity.msg | default('errore di rete'))
+          }}.
 
-    - name: Verifica supporto CPU virtualizzazione (se bare metal)
-      ansible.builtin.command: grep -E "(vmx|svm)" /proc/cpuinfo
-      register: cpu_virt
+    - name: Verifica i flag CPU di virtualizzazione su bare metal Linux
+      ansible.builtin.command:
+        argv:
+          - grep
+          - -E
+          - "(vmx|svm)"
+          - /proc/cpuinfo
+      register: cpu_virtualization
       changed_when: false
       failed_when: false
-      when: environment_type == 'bare_metal'
-
-    - name: Conferma supporto CPU virtualizzazione
-      ansible.builtin.debug:
-        msg: "CPU supporta virtualizzazione"
       when:
         - environment_type == 'bare_metal'
-        - cpu_virt.rc == 0
+        - not is_freebsd_like | bool
 
-    - name: Verifica errori del kernel
-      ansible.builtin.command: dmesg | tail -20 | grep -i error || echo "no_errors"
-      register: kernel_errors
+    - name: Riporta il supporto CPU alla virtualizzazione
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'Flag di virtualizzazione Intel/AMD rilevati.'
+            if cpu_virtualization.rc == 0
+            else 'Flag non rilevati o architettura non x86.'
+          }}
+      when:
+        - environment_type == 'bare_metal'
+        - not is_freebsd_like | bool
+
+    - name: Legge i messaggi del kernel
+      ansible.builtin.command:
+        argv:
+          - dmesg
+      register: kernel_messages
       changed_when: false
       failed_when: false
 
-    - name: Mostra stato errori kernel
+    - name: Riporta gli errori del kernel
       ansible.builtin.debug:
-        msg: "Kernel errors: {{ 'NONE' if kernel_errors.stdout == 'no_errors' else 'PRESENT' }}"
+        msg: >-
+          {{
+            'Messaggi kernel con errori: '
+            ~ (
+              (kernel_messages.stdout_lines | default([]))[-20:]
+              | select('search', '(?i)error')
+              | list | join('\n')
+            )
+            if (
+              (kernel_messages.stdout_lines | default([]))[-20:]
+              | select('search', '(?i)error') | list | length > 0
+            )
+            else 'Nessun errore rilevato o dmesg non accessibile.'
+          }}
 
-    - name: Verifica errori sistema (journalctl)
-      ansible.builtin.command: journalctl -p err -n 5 --no-pager 2>/dev/null || echo "journalctl_unavailable"
-      register: system_errors
+    - name: Verifica gli ultimi errori del journal Linux
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - -p
+          - err
+          - -n
+          - "5"
+          - --no-pager
+      register: linux_system_errors
       changed_when: false
       failed_when: false
+      when: not is_freebsd_like | bool
 
-    - name: Mostra stato errori sistema
-      ansible.builtin.debug:
-        msg: "Journal errors: {{ 'NONE' if system_errors.stdout | length < 5 or 'unavailable' in system_errors.stdout else 'PRESENT' }}"
-
-    - name: Genera riepilogo finale
-      ansible.builtin.debug:
-        msg:
-          - "================================================================================"
-          - "                              HEALTH CHECK REPORT"
-          - "================================================================================"
-          - "Host: {{ inventory_hostname }} ({{ ansible_facts.hostname }})"
-          - "FQDN: {{ ansible_facts.fqdn }}"
-          - "Utente esecuzione: {{ current_user }} (UID: {{ current_uid }})"
-          - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
-          - "Kernel: {{ ansible_facts.kernel }} ({{ ansible_facts.architecture }})"
-          - "Ambiente: {{ environment_type | upper }}"
-          - ""
-          - "HARDWARE:"
-          - "  CPU: {{ ansible_facts.processor_vcpus }} vCPU"
-          - "  RAM: {{ (ansible_facts.memtotal_mb | int / 1024) | round(1) }} GB"
-          - "  Disco root libero: {{ (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1) }} GB"
-          - ""
-          - "SERVIZI:"
-          - "  SSH: attivo"
-          - "  Python: disponibile"
-          - "{{ '  Firewall: configurato' if current_uid == '0' else '  Firewall: non verificato (non-root)' }}"
-          - ""
-          - "PRIVILEGI:"
-          - "  Root: {{ 'YES' if current_uid == '0' else 'NO (Modalità Limited)' }}"
-          - ""
-          - "================================================================================"
-          - "STATUS: ✓ OK - SISTEMA PRONTO PER ANSIBLE"
-          - "================================================================================"
-
-    - name: Salva report JSON
-      ansible.builtin.copy:
-        content: "{{ {
-          'host': inventory_hostname,
-          'hostname': ansible_facts.hostname,
-          'fqdn': ansible_facts.fqdn,
-          'user': current_user,
-          'uid': current_uid,
-          'is_root': current_uid == '0',
-          'os': ansible_facts.distribution ~ ' ' ~ ansible_facts.distribution_version,
-          'kernel': ansible_facts.kernel,
-          'architecture': ansible_facts.architecture,
-          'environment': environment_type,
-          'cpu_vcpu': ansible_facts.processor_vcpus,
-          'ram_gb': (ansible_facts.memtotal_mb | int / 1024) | round(1),
-          'disk_free_gb': (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first)['size_available'] / 1073741824 | round(1),
-          'ssh_status': 'running',
-          'python_available': true,
-          'status': 'OK'
-        } | to_nice_json }}"
-        dest: "{{ report_dir }}/check-{{ inventory_hostname }}.json"
-        mode: "0644"
+    - name: Verifica gli ultimi messaggi syslog FreeBSD e OPNsense
+      ansible.builtin.command:
+        argv:
+          - tail
+          - -n
+          - "5"
+          - /var/log/messages
+      register: freebsd_system_errors
+      changed_when: false
       failed_when: false
+      when: is_freebsd_like | bool
 
-  handlers:
-    - name: Restart SSH
-      ansible.builtin.systemd:
-        name: ssh
-        state: restarted
-        enabled: true
-      when: current_uid == "0"
-      ignore_errors: true
-
-  post_tasks:
-    - name: Mostra posizione report JSON
+    - name: Riporta gli ultimi messaggi di sistema
       ansible.builtin.debug:
-        msg: |
-          Report JSON salvato in: {{ report_dir }}/check-{{ inventory_hostname }}.json
+        msg: >-
+          {{
+            'Journal: ' ~ (linux_system_errors.stdout | trim)
+            if not is_freebsd_like | bool
+               and linux_system_errors.rc == 0
+               and linux_system_errors.stdout | trim | length > 0
+            else (
+              'Syslog: ' ~ (freebsd_system_errors.stdout | trim)
+              if is_freebsd_like | bool
+                 and freebsd_system_errors.rc == 0
+                 and freebsd_system_errors.stdout | trim | length > 0
+              else 'Journal/syslog non disponibile o nessun messaggio recente.'
+            )
+          }}
+
+    - name: Mostra il report JSON in output senza salvarlo sull'host
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            {
+              'host': inventory_hostname,
+              'hostname': ansible_facts.hostname | default(''),
+              'distribution': ansible_facts.distribution | default(''),
+              'distribution_version':
+                ansible_facts.distribution_version | default(''),
+              'os_family': ansible_facts.os_family,
+              'kernel': ansible_facts.kernel | default(''),
+              'kernel_name': detected_kernel.stdout | default(''),
+              'is_freebsd_like': is_freebsd_like | bool,
+              'is_opnsense': is_opnsense | bool,
+              'opnsense_version':
+                opnsense_version.stdout | default('') | trim,
+              'environment': environment_type,
+              'cpu_cores': cpu_cores,
+              'cpu_ok': cpu_ok | bool,
+              'memory_mb': ansible_facts.memtotal_mb | default(0),
+              'memory_ok': memory_ok | bool,
+              'disk_free_gb':
+                ((root_mount.get('size_available', 0) | int) / 1073741824)
+                | round(1),
+              'disk_ok': disk_ok | bool,
+              'package_check_applicable': package_check_applicable | bool,
+              'package_facts_available': package_facts_available | bool,
+              'missing_required_packages': missing_required_packages,
+              'ssh_service': ssh_service_name,
+              'ssh_port_listening':
+                ssh_listen.rc == 0 and ssh_listen.stdout | trim | length > 0,
+              'dns_ok': dns_check.rc == 0,
+              'https_status':
+                external_connectivity.status | default('unavailable'),
+              'status': 'OK' if (
+                memory_ok | bool
+                and cpu_ok | bool
+                and disk_ok | bool
+                and (
+                  not package_check_applicable | bool
+                  or (
+                    package_facts_available | bool
+                    and missing_required_packages | length == 0
+                  )
+                )
+              ) else 'WARNING'
+            } | to_nice_json
+          }}
